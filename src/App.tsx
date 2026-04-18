@@ -79,6 +79,54 @@ function formatLastUpdated(value: string | null): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+function getOtherAccountsSortLabel(sort: SecondaryAccountsSort): string {
+  if (sort === "reset_asc") return "Reset: earliest to latest";
+  if (sort === "reset_desc") return "Reset: latest to earliest";
+  if (sort === "remaining_asc") return "% remaining: lowest to highest";
+  return "% remaining: highest to lowest";
+}
+
+function OtherAccountsLoadingState() {
+  return (
+    <div className="rounded-2xl border border-border/70 bg-muted/18 p-3">
+      <div className="space-y-3">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <div
+            key={index}
+            className="overflow-hidden rounded-[20px] border border-border/60 bg-background/70"
+          >
+            <div className="border-b border-border/60 px-4 py-2.5">
+              <div className="h-4 w-40 animate-pulse rounded-full bg-muted/55" />
+            </div>
+            <div className="space-y-0">
+              {Array.from({ length: index === 1 ? 2 : 1 }).map((__, rowIndex) => (
+                <div
+                  key={rowIndex}
+                  className="grid gap-x-4 gap-y-2 px-4 py-3 md:grid-cols-[minmax(0,116px)_minmax(0,1fr)_72px]"
+                >
+                  <div className="h-7 w-24 animate-pulse rounded-full bg-muted/50" />
+                  <div className="space-y-2">
+                    <div className="h-3.5 w-28 animate-pulse rounded-full bg-muted/55" />
+                    <div className="h-1.5 w-full animate-pulse rounded-full bg-muted/45" />
+                    <div className="h-3 w-56 animate-pulse rounded-full bg-muted/40" />
+                    <div className="h-3.5 w-24 animate-pulse rounded-full bg-muted/55" />
+                    <div className="h-1.5 w-full animate-pulse rounded-full bg-muted/45" />
+                    <div className="h-3 w-56 animate-pulse rounded-full bg-muted/40" />
+                  </div>
+                  <div className="flex justify-end gap-1">
+                    <div className="size-8 animate-pulse rounded-lg bg-muted/45" />
+                    <div className="size-8 animate-pulse rounded-lg bg-muted/45" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const {
     accounts,
@@ -395,6 +443,7 @@ function App() {
       return identityDiff;
     });
   }, [activeAccount?.id, otherAccountsSort, secondaryGroups]);
+  const otherAccountsSortLabel = getOtherAccountsSortLabel(otherAccountsSort);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -485,57 +534,59 @@ function App() {
               }
               contentClassName="space-y-5"
             >
-                  {loading ? (
-                    <div className="grid gap-3 overflow-hidden">
-                      {Array.from({ length: 8 }).map((_, index) => (
-                        <Card
-                          key={index}
-                          className="h-16 animate-pulse border-dashed bg-muted/20 shadow-none"
-                        />
-                      ))}
-                    </div>
-                  ) : null}
+              {!loading && !error && secondaryGroups.length > 0 ? (
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-xs">
+                  <div className="min-w-0">
+                    <span className="font-medium text-foreground/85">Sorted by</span>
+                    <span className="ml-2 text-muted-foreground">{otherAccountsSortLabel}</span>
+                  </div>
+                  <span className="shrink-0 rounded-full border border-border/70 bg-background/80 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                    {secondaryGroups.length} groups
+                  </span>
+                </div>
+              ) : null}
 
-                  {!loading && error ? (
-                    <Card className="border-red-200/70 bg-red-500/10 shadow-none dark:border-red-800/70">
-                      <CardContent className="p-5 text-sm text-red-700 dark:text-red-300">
-                        {error}
-                      </CardContent>
-                    </Card>
-                  ) : null}
+              {loading ? <OtherAccountsLoadingState /> : null}
 
-                  {!loading && !error && secondaryGroups.length === 0 ? (
-                    <Card className="border-dashed shadow-none">
-                      <CardContent className="flex min-h-[240px] flex-col items-center justify-center gap-4 p-8 text-center">
-                        <div className="rounded-2xl border bg-muted/40 p-4">
-                          <Users className="size-6 text-muted-foreground" />
-                        </div>
-                        <div className="space-y-2">
-                          <CardTitle>No secondary accounts</CardTitle>
-                          <CardDescription>
-                            Add more accounts to build a fallback pool for switching and warm-up traffic.
-                          </CardDescription>
-                        </div>
-                        <Button variant="outline" onClick={() => setIsAddModalOpen(true)}>
-                          <Plus />
-                          Add Account
-                        </Button>
-                      </CardContent>
-                    </Card>
-                  ) : null}
+              {!loading && error ? (
+                <div className="rounded-2xl border border-amber-300/60 bg-amber-500/10 px-4 py-4 text-sm text-amber-900 shadow-[var(--shadow-soft)] dark:border-amber-800/70 dark:text-amber-200">
+                  <div className="font-medium">Couldn’t load other accounts</div>
+                  <div className="mt-1 text-sm text-amber-800/90 dark:text-amber-200/80">
+                    {error}
+                  </div>
+                </div>
+              ) : null}
 
-                  {!loading && !error && secondaryGroups.length > 0 ? (
-                    <SecondaryAccountsTable
-                      embedded
-                      groups={sortedSecondaryGroups}
-                      activeAccountId={activeAccount?.id ?? null}
-                      switchingId={switchingId}
-                      hasRunningProcesses={hasRunningProcesses}
-                      maskedAccountIds={maskedAccounts}
-                      onSwitch={(accountId) => void handleSwitch(accountId)}
-                      onDelete={setDeleteTarget}
-                    />
-                  ) : null}
+              {!loading && !error && secondaryGroups.length === 0 ? (
+                <div className="flex min-h-[240px] flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border/70 bg-muted/18 px-8 py-10 text-center shadow-none">
+                  <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
+                    <Users className="size-6 text-muted-foreground" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <CardTitle>No secondary accounts</CardTitle>
+                    <CardDescription>
+                      Add more accounts to build a fallback pool for switching and warm-up traffic.
+                    </CardDescription>
+                  </div>
+                  <Button variant="outline" onClick={() => setIsAddModalOpen(true)}>
+                    <Plus />
+                    Add Account
+                  </Button>
+                </div>
+              ) : null}
+
+              {!loading && !error && secondaryGroups.length > 0 ? (
+                <SecondaryAccountsTable
+                  embedded
+                  groups={sortedSecondaryGroups}
+                  activeAccountId={activeAccount?.id ?? null}
+                  switchingId={switchingId}
+                  hasRunningProcesses={hasRunningProcesses}
+                  maskedAccountIds={maskedAccounts}
+                  onSwitch={(accountId) => void handleSwitch(accountId)}
+                  onDelete={setDeleteTarget}
+                />
+              ) : null}
             </PanelShell>
           </div>
         </section>

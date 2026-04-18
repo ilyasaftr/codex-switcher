@@ -17,22 +17,29 @@ function maskValue(value: string, masked: boolean) {
   return "•".repeat(Math.max(8, Math.min(value.length, 18)));
 }
 
-function StatRow({
-  label,
-  value,
+function SummaryRail({
+  rows,
   masked,
 }: {
-  label: string;
-  value: string;
+  rows: Array<{ label: string; value: string }>;
   masked: boolean;
 }) {
   return (
-    <div className="rounded-xl border bg-background/70 px-3 py-3">
-      <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-2 break-all text-sm font-medium text-foreground">
-        {maskValue(value, masked)}
+    <div className="rounded-2xl border border-border/60 bg-muted/20 px-4 py-3">
+      <div className="grid gap-3 md:grid-cols-3">
+        {rows.map((row, index) => (
+          <div
+            key={row.label}
+            className={index > 0 ? "md:border-l md:border-border/60 md:pl-4" : undefined}
+          >
+            <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+              {row.label}
+            </div>
+            <div className="mt-1.5 break-all text-sm font-medium text-foreground/90">
+              {maskValue(row.value, masked)}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -62,22 +69,18 @@ export function AccountCard({
         </PanelActionButton>
       }
       className="h-full shadow-[var(--shadow-soft)]"
-      contentClassName="space-y-5"
+      contentClassName="space-y-4"
     >
-      <div className="grid gap-3 md:grid-cols-3">
-        {metadataRows.map((row) => (
-          <StatRow key={row.label} label={row.label} value={row.value} masked={masked} />
-        ))}
-      </div>
+      <SummaryRail rows={metadataRows} masked={masked} />
 
-      <div className="rounded-2xl border bg-muted/35 p-4">
+      <div className="rounded-2xl border bg-muted/35 p-4 shadow-[var(--shadow-soft)]">
         <div className="mb-3 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-sm font-medium">
             <ShieldCheck className="size-4 text-muted-foreground" />
             Usage Windows
           </div>
           {account.usageLoading ? (
-            <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+            <span className="rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
               Syncing
             </span>
           ) : null}
