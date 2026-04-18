@@ -1,14 +1,18 @@
 //! Usage API client for fetching rate limits and credits
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use futures::{stream, StreamExt};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT},
     StatusCode,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::{ensure_chatgpt_tokens_fresh, refresh_chatgpt_tokens};
+use crate::auth::{
+    ensure_chatgpt_tokens_fresh, get_account, refresh_chatgpt_tokens, update_account_team_metadata,
+};
 use crate::types::{
     AuthData, CreditStatusDetails, RateLimitDetails, RateLimitStatusPayload, RateLimitWindow,
     StoredAccount, UsageInfo,
@@ -16,8 +20,30 @@ use crate::types::{
 
 const CHATGPT_BACKEND_API: &str = "https://chatgpt.com/backend-api";
 const CHATGPT_CODEX_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/responses";
+const CHATGPT_ACCOUNT_CHECK_API: &str = "https://chatgpt.com/backend-api/wham/accounts/check";
 const OPENAI_API: &str = "https://api.openai.com/v1";
 const CODEX_USER_AGENT: &str = "codex-cli/1.0.0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountMetadata {
+    pub email: Option<String>,
+    pub plan_type: Option<String>,
+    pub team_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountsCheckResponse {
+    accounts: Vec<AccountsCheckAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountsCheckAccount {
+    id: String,
+    #[serde(default)]
+    plan_type: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
 
 /// Get usage information for an account
 pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
@@ -56,6 +82,85 @@ pub async fn warmup_account(account: &StoredAccount) -> Result<()> {
         AuthData::ApiKey { key } => warmup_with_api_key(key).await,
         AuthData::ChatGPT { .. } => warmup_with_chatgpt_auth(account).await,
     }
+}
+
+/// Refresh and persist cached account metadata for one stored ChatGPT account.
+pub async fn refresh_account_metadata(account_id: &str) -> Result<Option<AccountMetadata>> {
+    let account = get_account(account_id)?
+        .ok_or_else(|| anyhow::anyhow!("Account not found: {account_id}"))?;
+
+    match &account.auth_data {
+        AuthData::ApiKey { .. } => Ok(None),
+        AuthData::ChatGPT { .. } => {
+            let fresh_account = ensure_chatgpt_tokens_fresh(&account).await?;
+            let metadata = fetch_account_metadata_for_account(&fresh_account).await?;
+            update_account_team_metadata(
+                &fresh_account.id,
+                metadata.email.clone(),
+                metadata.plan_type.clone(),
+                metadata.team_name.clone(),
+                Utc::now(),
+            )?;
+            Ok(Some(metadata))
+        }
+    }
+}
+
+pub async fn fetch_account_metadata_for_account(
+    account: &StoredAccount,
+) -> Result<AccountMetadata> {
+    let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
+    let response = send_chatgpt_accounts_check_request(access_token, chatgpt_account_id).await?;
+
+    if response.status() == StatusCode::UNAUTHORIZED {
+        println!(
+            "[Metadata] Unauthorized for account {}, refreshing token and retrying once",
+            account.name
+        );
+        let refreshed_account = refresh_chatgpt_tokens(account).await?;
+        return fetch_account_metadata_from_response(
+            &refreshed_account,
+            send_chatgpt_accounts_check_request(
+                extract_chatgpt_auth(&refreshed_account)?.0,
+                extract_chatgpt_auth(&refreshed_account)?.1,
+            )
+            .await?,
+        )
+        .await;
+    }
+
+    fetch_account_metadata_from_response(account, response).await
+}
+
+async fn fetch_account_metadata_from_response(
+    account: &StoredAccount,
+    response: reqwest::Response,
+) -> Result<AccountMetadata> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        println!("[Metadata] Error response: {body}");
+        anyhow::bail!("Account metadata request failed with status {status}");
+    }
+
+    let body = response
+        .text()
+        .await
+        .context("Failed to read account metadata response body")?;
+    let payload: AccountsCheckResponse =
+        serde_json::from_str(&body).context("Failed to parse account metadata response")?;
+
+    let account_id = match &account.auth_data {
+        AuthData::ChatGPT { account_id, .. } => account_id.as_deref(),
+        AuthData::ApiKey { .. } => None,
+    };
+
+    Ok(build_account_metadata(
+        account.email.clone(),
+        account.plan_type.clone(),
+        account_id,
+        payload,
+    ))
 }
 
 async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageInfo> {
@@ -126,8 +231,7 @@ async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
-    let mut response =
-        send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
+    let mut response = send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
     if response.status() == StatusCode::UNAUTHORIZED {
         println!(
             "[Warmup] Unauthorized for account {}, refreshing token and retrying once",
@@ -260,6 +364,21 @@ async fn send_chatgpt_usage_request(
         .send()
         .await
         .context("Failed to send usage request")
+}
+
+async fn send_chatgpt_accounts_check_request(
+    access_token: &str,
+    chatgpt_account_id: Option<&str>,
+) -> Result<reqwest::Response> {
+    let client = reqwest::Client::new();
+    let headers = build_chatgpt_headers(access_token, chatgpt_account_id)?;
+
+    client
+        .get(CHATGPT_ACCOUNT_CHECK_API)
+        .headers(headers)
+        .send()
+        .await
+        .context("Failed to send account metadata request")
 }
 
 async fn send_chatgpt_warmup_request(
@@ -404,6 +523,31 @@ fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusD
     credits
 }
 
+fn build_account_metadata(
+    email: Option<String>,
+    fallback_plan_type: Option<String>,
+    selected_account_id: Option<&str>,
+    payload: AccountsCheckResponse,
+) -> AccountMetadata {
+    let matched = selected_account_id
+        .and_then(|account_id| payload.accounts.iter().find(|entry| entry.id == account_id));
+
+    let plan_type = matched
+        .and_then(|entry| entry.plan_type.clone())
+        .or(fallback_plan_type);
+
+    let team_name = matched.and_then(|entry| match entry.plan_type.as_deref() {
+        Some("team") => entry.name.clone(),
+        _ => None,
+    });
+
+    AccountMetadata {
+        email,
+        plan_type,
+        team_name,
+    }
+}
+
 /// Refresh all account usage
 pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
     println!("[Usage] Refreshing usage for {} accounts", accounts.len());
@@ -425,4 +569,60 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
 
     println!("[Usage] Refresh complete");
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_account_metadata, AccountMetadata, AccountsCheckResponse};
+
+    #[test]
+    fn account_metadata_uses_matching_team_workspace_name() {
+        let payload: AccountsCheckResponse = serde_json::from_str(
+            r#"{
+                "accounts": [
+                    { "id": "team-1", "plan_type": "team", "name": "Lokawave" },
+                    { "id": "personal-1", "plan_type": "free", "name": null }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let metadata = build_account_metadata(
+            Some("user@example.com".to_string()),
+            Some("team".to_string()),
+            Some("team-1"),
+            payload,
+        );
+
+        assert_eq!(
+            metadata,
+            AccountMetadata {
+                email: Some("user@example.com".to_string()),
+                plan_type: Some("team".to_string()),
+                team_name: Some("Lokawave".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn account_metadata_keeps_personal_accounts_without_team_name() {
+        let payload: AccountsCheckResponse = serde_json::from_str(
+            r#"{
+                "accounts": [
+                    { "id": "personal-1", "plan_type": "free", "name": null }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let metadata = build_account_metadata(
+            Some("user@example.com".to_string()),
+            Some("free".to_string()),
+            Some("personal-1"),
+            payload,
+        );
+
+        assert_eq!(metadata.team_name, None);
+        assert_eq!(metadata.plan_type.as_deref(), Some("free"));
+    }
 }

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 
 use crate::types::{AccountsStore, AuthData, StoredAccount};
 
@@ -151,6 +152,8 @@ pub fn update_account_metadata(
     name: Option<String>,
     email: Option<String>,
     plan_type: Option<String>,
+    team_name: Option<String>,
+    team_info_updated_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
     let mut store = load_accounts()?;
 
@@ -182,6 +185,14 @@ pub fn update_account_metadata(
 
     if plan_type.is_some() {
         account.plan_type = plan_type;
+    }
+
+    if team_name.is_some() {
+        account.team_name = team_name;
+    }
+
+    if team_info_updated_at.is_some() {
+        account.team_info_updated_at = team_info_updated_at;
     }
 
     save_accounts(&store)?;
@@ -232,6 +243,38 @@ pub fn update_account_chatgpt_tokens(
     if let Some(new_plan_type) = plan_type {
         account.plan_type = Some(new_plan_type);
     }
+
+    let updated = account.clone();
+    save_accounts(&store)?;
+    Ok(updated)
+}
+
+/// Update cached ChatGPT account metadata and return the updated account.
+pub fn update_account_team_metadata(
+    account_id: &str,
+    email: Option<String>,
+    plan_type: Option<String>,
+    team_name: Option<String>,
+    team_info_updated_at: DateTime<Utc>,
+) -> Result<StoredAccount> {
+    let mut store = load_accounts()?;
+
+    let account = store
+        .accounts
+        .iter_mut()
+        .find(|a| a.id == account_id)
+        .context("Account not found")?;
+
+    if let Some(email) = email {
+        account.email = Some(email);
+    }
+
+    if let Some(plan_type) = plan_type {
+        account.plan_type = Some(plan_type);
+    }
+
+    account.team_name = team_name;
+    account.team_info_updated_at = Some(team_info_updated_at);
 
     let updated = account.clone();
     save_accounts(&store)?;

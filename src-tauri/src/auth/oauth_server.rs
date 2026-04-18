@@ -164,9 +164,7 @@ pub struct OAuthLoginResult {
 }
 
 /// Start the OAuth login flow
-pub async fn start_oauth_login(
-    account_name: String,
-) -> Result<(
+pub async fn start_oauth_login() -> Result<(
     OAuthLoginInfo,
     oneshot::Receiver<Result<OAuthLoginResult>>,
     Arc<AtomicBool>,
@@ -174,7 +172,6 @@ pub async fn start_oauth_login(
     let pkce = generate_pkce();
     let state = generate_state();
 
-    println!("[OAuth] Starting login for account: {account_name}");
     println!("[OAuth] PKCE challenge: {}", &pkce.code_challenge[..20]);
 
     // Try official default port first; fall back to a random free port if it is busy.
@@ -226,7 +223,6 @@ pub async fn start_oauth_login(
             pkce_clone,
             state_clone,
             redirect_uri,
-            account_name,
             cancelled_clone,
         ));
         let _ = tx.send(result);
@@ -241,7 +237,6 @@ async fn run_oauth_server(
     pkce: PkceCodes,
     expected_state: String,
     redirect_uri: String,
-    account_name: String,
     cancelled: Arc<AtomicBool>,
 ) -> Result<OAuthLoginResult> {
     let timeout = Duration::from_secs(300); // 5 minute timeout
@@ -263,14 +258,7 @@ async fn run_oauth_server(
             Err(_) => continue,
         };
 
-        let result = handle_oauth_request(
-            request,
-            &pkce,
-            &expected_state,
-            &redirect_uri,
-            &account_name,
-        )
-        .await;
+        let result = handle_oauth_request(request, &pkce, &expected_state, &redirect_uri).await;
 
         match result {
             HandleResult::Continue => continue,
@@ -297,7 +285,6 @@ async fn handle_oauth_request(
     pkce: &PkceCodes,
     expected_state: &str,
     redirect_uri: &str,
-    account_name: &str,
 ) -> HandleResult {
     let url_str = request.url().to_string();
     let parsed = match url::Url::parse(&format!("http://localhost{url_str}")) {
@@ -367,7 +354,7 @@ async fn handle_oauth_request(
 
                 // Create the account
                 let account = StoredAccount::new_chatgpt(
-                    account_name.to_string(),
+                    "ChatGPT Account".to_string(),
                     email,
                     plan_type,
                     tokens.id_token,

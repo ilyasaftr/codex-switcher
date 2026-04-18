@@ -40,6 +40,12 @@ pub struct StoredAccount {
     pub email: Option<String>,
     /// Plan type: free, plus, pro, team, business, enterprise, edu
     pub plan_type: Option<String>,
+    /// Cached team/workspace name for ChatGPT team accounts
+    #[serde(default)]
+    pub team_name: Option<String>,
+    /// Last successful refresh time for cached account metadata
+    #[serde(default)]
+    pub team_info_updated_at: Option<DateTime<Utc>>,
     /// Authentication mode
     pub auth_mode: AuthMode,
     /// Authentication credentials
@@ -58,6 +64,8 @@ impl StoredAccount {
             name,
             email: None,
             plan_type: None,
+            team_name: None,
+            team_info_updated_at: None,
             auth_mode: AuthMode::ApiKey,
             auth_data: AuthData::ApiKey { key: api_key },
             created_at: Utc::now(),
@@ -67,7 +75,7 @@ impl StoredAccount {
 
     /// Create a new account with ChatGPT OAuth authentication
     pub fn new_chatgpt(
-        name: String,
+        fallback_name: String,
         email: Option<String>,
         plan_type: Option<String>,
         id_token: String,
@@ -77,9 +85,11 @@ impl StoredAccount {
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            name,
+            name: email.clone().unwrap_or(fallback_name),
             email,
             plan_type,
+            team_name: None,
+            team_info_updated_at: None,
             auth_mode: AuthMode::ChatGPT,
             auth_data: AuthData::ChatGPT {
                 id_token,
@@ -168,6 +178,8 @@ pub struct AccountInfo {
     pub name: String,
     pub email: Option<String>,
     pub plan_type: Option<String>,
+    pub team_name: Option<String>,
+    pub team_info_updated_at: Option<DateTime<Utc>>,
     pub auth_mode: AuthMode,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
@@ -181,6 +193,8 @@ impl AccountInfo {
             name: account.name.clone(),
             email: account.email.clone(),
             plan_type: account.plan_type.clone(),
+            team_name: account.team_name.clone(),
+            team_info_updated_at: account.team_info_updated_at,
             auth_mode: account.auth_mode,
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
@@ -257,6 +271,27 @@ pub struct ImportAccountsSummary {
     pub imported_count: usize,
     /// Number of accounts skipped because they already exist.
     pub skipped_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StoredAccount;
+
+    #[test]
+    fn new_chatgpt_uses_email_as_name_when_available() {
+        let account = StoredAccount::new_chatgpt(
+            "Fallback Name".to_string(),
+            Some("user@example.com".to_string()),
+            Some("team".to_string()),
+            "id-token".to_string(),
+            "access-token".to_string(),
+            "refresh-token".to_string(),
+            Some("workspace-1".to_string()),
+        );
+
+        assert_eq!(account.name, "user@example.com");
+        assert_eq!(account.email.as_deref(), Some("user@example.com"));
+    }
 }
 
 /// OAuth login information returned to frontend

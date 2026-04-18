@@ -14,8 +14,8 @@ use crate::commands::{
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, get_active_account_info, get_masked_account_ids, get_usage,
     import_accounts_full_encrypted_bytes, import_accounts_slim_text, list_accounts,
-    refresh_all_accounts_usage, rename_account, set_masked_account_ids, start_login,
-    switch_account, warmup_account, warmup_all_accounts,
+    refresh_account_metadata, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
+    start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -35,13 +35,6 @@ struct RenameAccountArgs {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginArgs {
-    #[serde(alias = "account_name")]
-    account_name: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct ImportSlimArgs {
     payload: String,
 }
@@ -53,7 +46,6 @@ struct MaskedIdsArgs {
 
 #[derive(Debug, Deserialize)]
 struct UploadAuthJsonArgs {
-    name: String,
     contents: String,
 }
 
@@ -67,7 +59,6 @@ struct UploadEncryptedArgs {
 #[derive(Debug, Deserialize)]
 struct FileImportArgs {
     path: String,
-    name: String,
 }
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
@@ -131,11 +122,11 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "get_active_account_info" => to_json(get_active_account_info().await?),
         "add_account_from_file" => {
             let args: FileImportArgs = parse_args(payload)?;
-            to_json(add_account_from_file(args.path, args.name).await?)
+            to_json(add_account_from_file(args.path).await?)
         }
         "add_account_from_auth_json_text" => {
             let args: UploadAuthJsonArgs = parse_args(payload)?;
-            to_json(add_account_from_auth_json_text(args.name, args.contents).await?)
+            to_json(add_account_from_auth_json_text(args.contents).await?)
         }
         "get_usage" => {
             let args: AccountIdArgs = parse_args(payload)?;
@@ -159,10 +150,11 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let args: RenameAccountArgs = parse_args(payload)?;
             to_json(rename_account(args.account_id, args.new_name).await?)
         }
-        "start_login" => {
-            let args: LoginArgs = parse_args(payload)?;
-            to_json(start_login(args.account_name).await?)
+        "refresh_account_metadata" => {
+            let args: AccountIdArgs = parse_args(payload)?;
+            to_json(refresh_account_metadata(args.account_id).await?)
         }
+        "start_login" => to_json(start_login().await?),
         "complete_login" => to_json(complete_login().await?),
         "cancel_login" => to_json(cancel_login().await?),
         "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),

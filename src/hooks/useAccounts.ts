@@ -12,12 +12,27 @@ export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
   const maxConcurrentUsageRequests = 10;
+  const maxConcurrentMetadataRequests = 4;
 
   useEffect(() => {
     accountsRef.current = accounts;
   }, [accounts]);
+
+  const mergeAccountWithExistingState = useCallback(
+    (nextAccount: AccountInfo, previousList: AccountWithUsage[]): AccountWithUsage => {
+      const previous = previousList.find((account) => account.id === nextAccount.id);
+      return {
+        ...nextAccount,
+        usage: previous?.usage,
+        usageLoading: previous?.usageLoading ?? false,
+        usageError: previous?.usageError ?? null,
+      };
+    },
+    []
+  );
 
   const buildUsageError = useCallback(
     (accountId: string, message: string, planType: string | null): UsageInfo => ({
@@ -73,11 +88,12 @@ export function useAccounts() {
           return accountList.map((a) => ({
             ...a,
             usage: usageMap.get(a.id)?.usage,
-            usageLoading: usageMap.get(a.id)?.usageLoading,
+            usageLoading: usageMap.get(a.id)?.usageLoading ?? false,
+            usageError: prev.find((existing) => existing.id === a.id)?.usageError ?? null,
           }));
         });
       } else {
-        setAccounts(accountList.map((a) => ({ ...a, usageLoading: false })));
+        setAccounts(accountList.map((a) => ({ ...a, usageLoading: false, usageError: null })));
       }
       return accountList;
     } catch (err) {
@@ -87,6 +103,23 @@ export function useAccounts() {
       setLoading(false);
     }
   }, []);
+
+  const upsertAccount = useCallback(
+    (nextAccount: AccountInfo) => {
+      setAccounts((prev) => {
+        const merged = mergeAccountWithExistingState(nextAccount, prev);
+        const index = prev.findIndex((account) => account.id === nextAccount.id);
+        if (index === -1) {
+          return [...prev, merged];
+        }
+
+        const next = [...prev];
+        next[index] = merged;
+        return next;
+      });
+    },
+    [mergeAccountWithExistingState]
+  );
 
   const refreshUsage = useCallback(
     async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
@@ -115,7 +148,7 @@ export function useAccounts() {
             setAccounts((prev) =>
               prev.map((account) =>
                 account.id === accountId
-                  ? { ...account, usage, usageLoading: false }
+                  ? { ...account, usage, usageLoading: false, usageError: null }
                   : account
               )
             );
@@ -127,8 +160,11 @@ export function useAccounts() {
                 account.id === accountId
                   ? {
                       ...account,
-                      usage: buildUsageError(accountId, message, account.plan_type ?? null),
+                      usage:
+                        account.usage ??
+                        buildUsageError(accountId, message, account.plan_type ?? null),
                       usageLoading: false,
+                      usageError: message,
                     }
                   : account
               )
@@ -137,6 +173,7 @@ export function useAccounts() {
         },
         maxConcurrentUsageRequests
       );
+      setLastRefreshedAt(new Date().toISOString());
     } catch (err) {
       console.error("Failed to refresh usage:", err);
       throw err;
@@ -155,7 +192,7 @@ export function useAccounts() {
       const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
       setAccounts((prev) =>
         prev.map((a) =>
-          a.id === accountId ? { ...a, usage, usageLoading: false } : a
+          a.id === accountId ? { ...a, usage, usageLoading: false, usageError: null } : a
         )
       );
     } catch (err) {
@@ -166,15 +203,76 @@ export function useAccounts() {
           a.id === accountId
             ? {
                 ...a,
-                usage: buildUsageError(accountId, message, a.plan_type ?? null),
+                usage: a.usage ?? buildUsageError(accountId, message, a.plan_type ?? null),
                 usageLoading: false,
+                usageError: message,
               }
             : a
         )
       );
       throw err;
     }
-  }, []);
+  }, [buildUsageError]);
+
+  const refreshAccountMetadata = useCallback(
+    async (accountId: string) => {
+      const account = await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
+      upsertAccount(account);
+      return account;
+    },
+    [upsertAccount]
+  );
+
+  const refreshAccountsMetadata = useCallback(
+    async (
+      accountList?: AccountInfo[] | AccountWithUsage[],
+      options?: { onlyMissing?: boolean }
+    ) => {
+      const list = accountList ?? accountsRef.current;
+      const targetIds = list
+        .filter((account) => {
+          if (account.auth_mode !== "chat_g_p_t") return false;
+          if (!options?.onlyMissing) return true;
+          return !account.team_info_updated_at;
+        })
+        .map((account) => account.id);
+
+      await runWithConcurrency(
+        targetIds,
+        async (accountId) => {
+          try {
+            await refreshAccountMetadata(accountId);
+          } catch (err) {
+            console.error("Failed to refresh account metadata:", err);
+          }
+        },
+        maxConcurrentMetadataRequests
+      );
+    },
+    [refreshAccountMetadata, runWithConcurrency]
+  );
+
+  const refreshAccount = useCallback(
+    async (accountId: string) => {
+      try {
+        await refreshAccountMetadata(accountId);
+      } catch (err) {
+        console.error("Failed to refresh account metadata:", err);
+      }
+
+      await refreshSingleUsage(accountId);
+    },
+    [refreshAccountMetadata, refreshSingleUsage]
+  );
+
+  const refreshAllAccounts = useCallback(
+    async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
+      const list = accountList ?? accountsRef.current;
+      await refreshAccountsMetadata(list);
+      await refreshUsage(list);
+    },
+    [refreshAccountsMetadata, refreshUsage]
+  );
 
   const warmupAccount = useCallback(async (accountId: string) => {
     try {
@@ -210,19 +308,7 @@ export function useAccounts() {
     async (accountId: string) => {
       try {
         await invokeBackend("delete_account", { accountId });
-        await loadAccounts();
-      } catch (err) {
-        throw err;
-      }
-    },
-    [loadAccounts]
-  );
-
-  const renameAccount = useCallback(
-    async (accountId: string, newName: string) => {
-      try {
-        await invokeBackend("rename_account", { accountId, newName });
-        await loadAccounts(true); // Preserve usage data
+        await loadAccounts(true);
       } catch (err) {
         throw err;
       }
@@ -231,32 +317,30 @@ export function useAccounts() {
   );
 
   const importFromFile = useCallback(
-    async (source: FileSource, name: string) => {
+    async (source: FileSource) => {
       try {
+        let account: AccountInfo;
         if (typeof source === "string") {
-          await invokeBackend<AccountInfo>("add_account_from_file", { path: source, name });
+          account = await invokeBackend<AccountInfo>("add_account_from_file", { path: source });
         } else {
           const contents = await source.text();
-          await invokeBackend<AccountInfo>("add_account_from_auth_json_text", {
-            name,
+          account = await invokeBackend<AccountInfo>("add_account_from_auth_json_text", {
             contents,
           });
         }
-        const accountList = await loadAccounts();
-        await refreshUsage(accountList);
+
+        upsertAccount(account);
+        await refreshSingleUsage(account.id);
       } catch (err) {
         throw err;
       }
     },
-    [loadAccounts, refreshUsage]
+    [refreshSingleUsage, upsertAccount]
   );
 
-  const startOAuthLogin = useCallback(async (accountName: string) => {
+  const startOAuthLogin = useCallback(async () => {
     try {
-      const info = await invokeBackend<{ auth_url: string; callback_port: number }>(
-        "start_login",
-        { accountName }
-      );
+      const info = await invokeBackend<{ auth_url: string; callback_port: number }>("start_login");
       return info;
     } catch (err) {
       throw err;
@@ -266,13 +350,13 @@ export function useAccounts() {
   const completeOAuthLogin = useCallback(async () => {
     try {
       const account = await invokeBackend<AccountInfo>("complete_login");
-      const accountList = await loadAccounts();
-      await refreshUsage(accountList);
+      upsertAccount(account);
+      await refreshSingleUsage(account.id);
       return account;
     } catch (err) {
       throw err;
     }
-  }, [loadAccounts, refreshUsage]);
+  }, [refreshSingleUsage, upsertAccount]);
 
   const exportAccountsSlimText = useCallback(async () => {
     try {
@@ -352,7 +436,10 @@ export function useAccounts() {
   }, []);
 
   useEffect(() => {
-    loadAccounts().then((accountList) => refreshUsage(accountList));
+    loadAccounts().then((accountList) => {
+      void refreshAccountsMetadata(accountList, { onlyMissing: true });
+      return refreshUsage(accountList);
+    });
     
     // Auto-refresh usage every 60 seconds (same as official Codex CLI)
     const interval = setInterval(() => {
@@ -360,20 +447,20 @@ export function useAccounts() {
     }, 60000);
     
     return () => clearInterval(interval);
-  }, [loadAccounts, refreshUsage]);
+  }, [loadAccounts, refreshAccountsMetadata, refreshUsage]);
 
   return {
     accounts,
     loading,
     error,
+    lastRefreshedAt,
     loadAccounts,
-    refreshUsage,
-    refreshSingleUsage,
+    refreshAllAccounts,
+    refreshAccount,
     warmupAccount,
     warmupAllAccounts,
     switchAccount,
     deleteAccount,
-    renameAccount,
     importFromFile,
     exportAccountsSlimText,
     importAccountsSlimText,

@@ -1,5 +1,6 @@
 //! Account management Tauri commands
 
+use crate::api::refresh_account_metadata as refresh_cached_account_metadata;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
     import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
@@ -96,31 +97,52 @@ pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
 
 /// Add an account from an auth.json file
 #[tauri::command]
-pub async fn add_account_from_file(path: String, name: String) -> Result<AccountInfo, String> {
+pub async fn add_account_from_file(path: String) -> Result<AccountInfo, String> {
     // Import from the file
-    let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
+    let account = import_from_auth_json(&path).map_err(|e| e.to_string())?;
 
     // Add to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
+    if let Err(err) = refresh_cached_account_metadata(&stored.id).await {
+        println!(
+            "[Account] Metadata refresh failed for imported account {}: {err}",
+            stored.id
+        );
+    }
+
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
+    let refreshed = store
+        .accounts
+        .iter()
+        .find(|account| account.id == stored.id)
+        .unwrap_or(&stored);
 
-    Ok(AccountInfo::from_stored(&stored, active_id))
+    Ok(AccountInfo::from_stored(refreshed, active_id))
 }
 
 /// Add an account from uploaded auth.json contents.
-pub async fn add_account_from_auth_json_text(
-    name: String,
-    contents: String,
-) -> Result<AccountInfo, String> {
-    let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
+pub async fn add_account_from_auth_json_text(contents: String) -> Result<AccountInfo, String> {
+    let account = import_from_auth_json_contents(&contents).map_err(|e| e.to_string())?;
     let stored = add_account(account).map_err(|e| e.to_string())?;
+
+    if let Err(err) = refresh_cached_account_metadata(&stored.id).await {
+        println!(
+            "[Account] Metadata refresh failed for uploaded account {}: {err}",
+            stored.id
+        );
+    }
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
+    let refreshed = store
+        .accounts
+        .iter()
+        .find(|account| account.id == stored.id)
+        .unwrap_or(&stored);
 
-    Ok(AccountInfo::from_stored(&stored, active_id))
+    Ok(AccountInfo::from_stored(refreshed, active_id))
 }
 
 /// Switch to a different account
@@ -177,9 +199,34 @@ pub async fn delete_account(account_id: String) -> Result<(), String> {
 /// Rename an account
 #[tauri::command]
 pub async fn rename_account(account_id: String, new_name: String) -> Result<(), String> {
-    crate::auth::storage::update_account_metadata(&account_id, Some(new_name), None, None)
-        .map_err(|e| e.to_string())?;
+    crate::auth::storage::update_account_metadata(
+        &account_id,
+        Some(new_name),
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Refresh cached account metadata without refreshing live usage.
+#[tauri::command]
+pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo, String> {
+    let _ = refresh_cached_account_metadata(&account_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    let active_id = store.active_account_id.as_deref();
+    let account = store
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+    Ok(AccountInfo::from_stored(account, active_id))
 }
 
 /// Export minimal account config as a compact text string.

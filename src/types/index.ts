@@ -1,12 +1,14 @@
 // Types matching the Rust backend
 
-export type AuthMode = "api_key" | "chat_gpt";
+export type AuthMode = "api_key" | "chat_g_p_t";
 
 export interface AccountInfo {
   id: string;
   name: string;
   email: string | null;
   plan_type: string | null;
+  team_name: string | null;
+  team_info_updated_at: string | null;
   auth_mode: AuthMode;
   is_active: boolean;
   created_at: string;
@@ -36,6 +38,7 @@ export interface OAuthLoginInfo {
 export interface AccountWithUsage extends AccountInfo {
   usage?: UsageInfo;
   usageLoading?: boolean;
+  usageError?: string | null;
 }
 
 export interface CodexProcessInfo {

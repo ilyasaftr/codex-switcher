@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
+use crate::api::refresh_account_metadata;
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
 use crate::auth::{
     add_account, load_accounts, set_active_account, switch_to_account, touch_account,
@@ -20,7 +21,7 @@ static PENDING_OAUTH: Mutex<Option<PendingOAuth>> = Mutex::new(None);
 
 /// Start the OAuth login flow
 #[tauri::command]
-pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String> {
+pub async fn start_login() -> Result<OAuthLoginInfo, String> {
     // Cancel any previous pending flow so it does not keep the callback port occupied.
     if let Some(previous) = {
         let mut pending = PENDING_OAUTH.lock().unwrap();
@@ -29,9 +30,7 @@ pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String>
         previous.cancelled.store(true, Ordering::Relaxed);
     }
 
-    let (info, rx, cancelled) = start_oauth_login(account_name)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (info, rx, cancelled) = start_oauth_login().await.map_err(|e| e.to_string())?;
 
     // Store the receiver for later
     {
@@ -64,10 +63,22 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
     switch_to_account(&stored).map_err(|e| e.to_string())?;
     touch_account(&stored.id).map_err(|e| e.to_string())?;
 
+    if let Err(err) = refresh_account_metadata(&stored.id).await {
+        println!(
+            "[OAuth] Account metadata refresh failed for {}: {err}",
+            stored.id
+        );
+    }
+
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
+    let refreshed = store
+        .accounts
+        .iter()
+        .find(|account| account.id == stored.id)
+        .unwrap_or(&stored);
 
-    Ok(AccountInfo::from_stored(&stored, active_id))
+    Ok(AccountInfo::from_stored(refreshed, active_id))
 }
 
 /// Cancel a pending OAuth login

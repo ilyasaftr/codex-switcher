@@ -79,31 +79,42 @@ fn create_auth_json(account: &StoredAccount) -> Result<AuthDotJson> {
 }
 
 /// Import an account from an existing auth.json file
-pub fn import_from_auth_json(path: &str, account_name: String) -> Result<StoredAccount> {
+pub fn import_from_auth_json(path: &str) -> Result<StoredAccount> {
     let content =
         fs::read_to_string(path).with_context(|| format!("Failed to read auth.json: {path}"))?;
 
-    import_from_auth_json_contents(&content, account_name)
+    import_from_auth_json_contents(&content)
         .with_context(|| format!("Failed to parse auth.json: {path}"))
 }
 
 /// Import an account from auth.json file contents.
-pub fn import_from_auth_json_contents(
-    content: &str,
-    account_name: String,
-) -> Result<StoredAccount> {
+pub fn import_from_auth_json_contents(content: &str) -> Result<StoredAccount> {
     let auth: AuthDotJson =
         serde_json::from_str(&content).context("Failed to parse auth.json contents")?;
 
     // Determine auth mode and create account
     if let Some(api_key) = auth.openai_api_key {
-        Ok(StoredAccount::new_api_key(account_name, api_key))
+        let suffix = api_key
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let fallback_name = if suffix.is_empty() {
+            "API Key Account".to_string()
+        } else {
+            format!("API Key {suffix}")
+        };
+
+        Ok(StoredAccount::new_api_key(fallback_name, api_key))
     } else if let Some(tokens) = auth.tokens {
         // Try to extract email and plan from id_token
         let (email, plan_type) = parse_id_token_claims(&tokens.id_token);
 
         Ok(StoredAccount::new_chatgpt(
-            account_name,
+            "Imported ChatGPT Account".to_string(),
             email,
             plan_type,
             tokens.id_token,

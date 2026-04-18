@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
-import { isTauriRuntime } from "../lib/platform";
+import { Download, RefreshCcw, Rocket, XCircle } from "lucide-react";
+
+import { isTauriRuntime } from "@/lib/platform";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 
 type UpdateStatus =
   | { kind: "idle" }
@@ -22,11 +26,7 @@ export function UpdateChecker() {
       setDismissed(false);
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
-      if (update) {
-        setStatus({ kind: "available", update });
-      } else {
-        setStatus({ kind: "idle" });
-      }
+      setStatus(update ? { kind: "available", update } : { kind: "idle" });
     } catch (err) {
       console.error("Update check failed:", err);
       setStatus({ kind: "idle" });
@@ -81,11 +81,7 @@ export function UpdateChecker() {
     }
   };
 
-  if (!isTauriRuntime()) {
-    return null;
-  }
-
-  if (status.kind === "idle" || status.kind === "checking" || dismissed) {
+  if (!isTauriRuntime() || status.kind === "idle" || status.kind === "checking" || dismissed) {
     return null;
   }
 
@@ -96,96 +92,93 @@ export function UpdateChecker() {
   };
 
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-md w-full px-4">
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl p-4">
-        {status.kind === "available" && (
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Update available: v{status.update.version}
-              </p>
-              {status.update.body && (
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
-                  {status.update.body}
+    <div className="fixed bottom-6 right-6 z-50 w-[min(30rem,calc(100vw-2rem))]">
+      <Card className="border-border/70 bg-card/96 backdrop-blur-sm">
+        <CardContent className="p-4">
+          {status.kind === "available" ? (
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Rocket className="size-4 text-muted-foreground" />
+                  Update ready: v{status.update.version}
+                </div>
+                {status.update.body ? (
+                  <p className="text-sm text-muted-foreground">{status.update.body}</p>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => setDismissed(true)}>
+                  Later
+                </Button>
+                <Button size="sm" onClick={() => void handleDownloadAndInstall()}>
+                  <Download />
+                  Install
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          {status.kind === "downloading" ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <div className="flex items-center gap-2 font-medium">
+                  <Download className="size-4 text-muted-foreground" />
+                  Downloading update
+                </div>
+                <div className="text-muted-foreground">
+                  {formatBytes(status.downloaded)}
+                  {status.total ? ` / ${formatBytes(status.total)}` : ""}
+                </div>
+              </div>
+              <div className="h-2 rounded-full bg-muted">
+                <div
+                  className="h-2 rounded-full bg-primary transition-all"
+                  style={{
+                    width:
+                      status.total && status.total > 0
+                        ? `${Math.min(100, (status.downloaded / status.total) * 100)}%`
+                        : "50%",
+                  }}
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {status.kind === "ready" ? (
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <RefreshCcw className="size-4 text-muted-foreground" />
+                  Restart required
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  The update has been downloaded and is ready to apply.
                 </p>
-              )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => setDismissed(true)}>
+                  Later
+                </Button>
+                <Button size="sm" onClick={() => void handleRelaunch()}>
+                  Restart
+                </Button>
+              </div>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => setDismissed(true)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
-              >
-                Later
-              </button>
-              <button
-                onClick={handleDownloadAndInstall}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
-              >
-                Update
-              </button>
-            </div>
-          </div>
-        )}
+          ) : null}
 
-        {status.kind === "downloading" && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Downloading update...</p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                {formatBytes(status.downloaded)}
-                {status.total ? ` / ${formatBytes(status.total)}` : ""}
-              </p>
+          {status.kind === "error" ? (
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-start gap-2 text-sm text-red-700 dark:text-red-300">
+                <XCircle className="mt-0.5 size-4" />
+                <span>Update failed: {status.message}</span>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setDismissed(true)}>
+                Dismiss
+              </Button>
             </div>
-            <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-1.5">
-              <div
-                className="bg-gray-900 dark:bg-gray-100 h-1.5 rounded-full transition-all duration-300"
-                style={{
-                  width:
-                    status.total && status.total > 0
-                      ? `${Math.min(100, (status.downloaded / status.total) * 100)}%`
-                      : "50%",
-                }}
-              />
-            </div>
-          </div>
-        )}
-
-        {status.kind === "ready" && (
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-              Update ready. Restart to apply.
-            </p>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => setDismissed(true)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
-              >
-                Later
-              </button>
-              <button
-                onClick={handleRelaunch}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
-              >
-                Restart
-              </button>
-            </div>
-          </div>
-        )}
-
-        {status.kind === "error" && (
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-red-600 dark:text-red-300">
-              Update failed: {status.message}
-            </p>
-            <button
-              onClick={() => setDismissed(true)}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors shrink-0 ml-2"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-      </div>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }

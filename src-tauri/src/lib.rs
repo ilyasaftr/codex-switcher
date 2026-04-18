@@ -10,8 +10,9 @@ use commands::{
     add_account_from_file, cancel_login, check_codex_processes, complete_login, delete_account,
     export_accounts_full_encrypted_file, export_accounts_slim_text, get_active_account_info,
     get_masked_account_ids, get_usage, import_accounts_full_encrypted_file,
-    import_accounts_slim_text, list_accounts, refresh_all_accounts_usage, rename_account,
-    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
+    import_accounts_slim_text, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
+    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
+    warmup_all_accounts,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,6 +35,7 @@ pub fn run() {
             switch_account,
             delete_account,
             rename_account,
+            refresh_account_metadata,
             export_accounts_slim_text,
             import_accounts_slim_text,
             export_accounts_full_encrypted_file,
