@@ -8,7 +8,6 @@ import {
   pickAuthJsonFile,
   type FileSource,
 } from "@/lib/platform";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,6 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 
 interface AddAccountModalProps {
   isOpen: boolean;
@@ -110,78 +110,108 @@ export function AddAccountModal({
     }
   };
 
-  const tabClass = (tab: Tab) =>
-    activeTab === tab ? "border-border bg-background text-foreground" : "text-muted-foreground";
+  const switchTab = (tab: Tab) => {
+    if (oauthPending) {
+      void onCancelOAuth().catch((err) => console.error("Failed to cancel login:", err));
+      setOauthPending(false);
+      setLoading(false);
+    }
+    setError(null);
+    setActiveTab(tab);
+  };
+
+  const methodCardClass = (tab: Tab) =>
+    cn(
+      "group flex h-full flex-col items-start gap-2.5 rounded-2xl border px-4 py-4 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+      activeTab === tab
+        ? "border-border bg-card text-foreground"
+        : "border-border/60 bg-background text-muted-foreground hover:border-border hover:text-foreground"
+    );
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-xl">
-        <DialogHeader>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline">Account Intake</Badge>
-            <Badge variant="default">Name = Email</Badge>
-          </div>
-          <DialogTitle>Add Account</DialogTitle>
+      <DialogContent className="max-w-2xl gap-5 [&>button]:right-5 [&>button]:top-5 [&>button]:rounded-full [&>button]:border [&>button]:border-transparent [&>button]:bg-background/70 [&>button]:p-1.5 [&>button]:text-muted-foreground [&>button]:hover:bg-muted/70 [&>button]:hover:text-foreground">
+        <DialogHeader className="gap-2 pr-10">
+          <DialogTitle className="text-[2rem] leading-none tracking-[-0.03em]">
+            Add Account
+          </DialogTitle>
           <DialogDescription>
-            New ChatGPT accounts use the email address as the saved account name.
+            Choose how you want to add this account.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="inline-flex rounded-xl border bg-muted/40 p-1">
+        <div className="grid gap-3 sm:grid-cols-2">
           <button
             type="button"
-            onClick={() => {
-              if (oauthPending) {
-                void onCancelOAuth().catch((err) => console.error("Failed to cancel login:", err));
-                setOauthPending(false);
-                setLoading(false);
-              }
-              setError(null);
-              setActiveTab("oauth");
-            }}
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tabClass("oauth")}`}
+            onClick={() => switchTab("oauth")}
+            className={methodCardClass("oauth")}
           >
-            Browser Login
+            <div
+              className={cn(
+                "rounded-full border p-2 transition-colors",
+                activeTab === "oauth"
+                  ? "border-border bg-muted/35"
+                  : "border-border/60 bg-background"
+              )}
+            >
+              <Globe className="size-4" />
+            </div>
+            <div className="space-y-1">
+              <div className="text-base font-semibold text-foreground">Browser Login</div>
+              <div className="text-sm text-muted-foreground">
+                Sign in through the browser.
+              </div>
+            </div>
           </button>
           <button
             type="button"
-            onClick={() => {
-              if (oauthPending) {
-                void onCancelOAuth().catch((err) => console.error("Failed to cancel login:", err));
-                setOauthPending(false);
-                setLoading(false);
-              }
-              setError(null);
-              setActiveTab("import");
-            }}
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tabClass("import")}`}
+            onClick={() => switchTab("import")}
+            className={methodCardClass("import")}
           >
-            Import `auth.json`
+            <div
+              className={cn(
+                "rounded-full border p-2 transition-colors",
+                activeTab === "import"
+                  ? "border-border bg-muted/35"
+                  : "border-border/60 bg-background"
+              )}
+            >
+              <FileJson2 className="size-4" />
+            </div>
+            <div className="space-y-1">
+              <div className="text-base font-semibold text-foreground">Import `auth.json`</div>
+              <div className="text-sm text-muted-foreground">
+                Use an existing session file.
+              </div>
+            </div>
           </button>
         </div>
 
         {activeTab === "oauth" ? (
-          <div className="rounded-2xl border bg-muted/25 p-4">
+          <div className="rounded-2xl border border-border/70 bg-muted/14 p-5">
             {oauthPending ? (
               <div className="space-y-4">
-                <div className="flex items-center gap-3">
-                  <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
-                  <div>
-                    <div className="text-sm font-medium">Waiting for browser login</div>
+                <div className="flex items-start gap-3">
+                  <div className="rounded-full border border-border/70 bg-background/80 p-2">
+                    <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium">Browser login is waiting</div>
                     <div className="text-sm text-muted-foreground">
-                      Open the generated link and complete the ChatGPT authentication flow.
+                      Open the generated link and finish authentication.
                     </div>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                     Login URL
                   </div>
-                  <div className="flex gap-2">
-                    <Input readOnly value={authUrl} className="font-mono text-xs" />
+                  <Input readOnly value={authUrl} className="font-mono text-xs" />
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       variant="outline"
+                      size="sm"
                       onClick={() => {
                         void navigator.clipboard
                           .writeText(authUrl)
@@ -193,17 +223,17 @@ export function AddAccountModal({
                       }}
                     >
                       <Copy />
-                      {copied ? "Copied" : "Copy"}
+                      {copied ? "Copied" : "Copy URL"}
                     </Button>
-                    <Button variant="outline" onClick={() => void openExternalUrl(authUrl)}>
+                    <Button variant="outline" size="sm" onClick={() => void openExternalUrl(authUrl)}>
                       <ExternalLink />
-                      Open
+                      Open in Browser
                     </Button>
                   </div>
                 </div>
 
                 {!tauriRuntime ? (
-                  <p className="text-sm text-amber-600 dark:text-amber-300">
+                  <p className="rounded-xl border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:border-amber-800/70 dark:text-amber-300">
                     The callback uses `localhost`, so the browser flow must complete on the same host.
                   </p>
                 ) : null}
@@ -211,25 +241,29 @@ export function AddAccountModal({
             ) : (
               <div className="space-y-3">
                 <div className="flex items-start gap-3">
-                  <Globe className="mt-0.5 size-4 text-muted-foreground" />
+                  <div className="rounded-full border border-border/70 bg-background/80 p-2">
+                    <Globe className="size-4 text-muted-foreground" />
+                  </div>
                   <div className="space-y-1 text-sm text-muted-foreground">
-                    <p>Generate a login link, authenticate in the browser, and the account will be added automatically.</p>
-                    <p>Email, plan type, and team metadata are pulled after login.</p>
+                    <p>Generate a secure login link and finish sign-in in your browser.</p>
+                    <p>Email and account metadata are pulled automatically after login.</p>
                   </div>
                 </div>
               </div>
             )}
           </div>
         ) : (
-          <div className="rounded-2xl border bg-muted/25 p-4">
+          <div className="rounded-2xl border border-border/70 bg-muted/14 p-5">
             <div className="flex items-start gap-3">
-              <FileJson2 className="mt-0.5 size-4 text-muted-foreground" />
-              <div className="flex-1 space-y-3">
+              <div className="rounded-full border border-border/70 bg-background/80 p-2">
+                <FileJson2 className="size-4 text-muted-foreground" />
+              </div>
+              <div className="flex-1 space-y-4">
                 <div className="text-sm text-muted-foreground">
-                  Import credentials from an existing Codex `auth.json` file. The saved account name is derived from the imported email.
+                  Choose a Codex `auth.json` file to import this account.
                 </div>
                 <div className="flex gap-2">
-                  <Input readOnly value={describeFileSource(fileSource)} />
+                  <Input readOnly value={describeFileSource(fileSource)} className="flex-1" />
                   <Button variant="outline" onClick={() => void handleSelectFile()}>
                     Browse
                   </Button>
@@ -240,12 +274,12 @@ export function AddAccountModal({
         )}
 
         {error ? (
-          <div className="rounded-xl border border-red-200/70 bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-300">
+          <div className="rounded-xl border border-amber-300/50 bg-amber-500/8 px-4 py-3 text-sm text-amber-800 dark:border-amber-800/70 dark:text-amber-200">
             {error}
           </div>
         ) : null}
 
-        <DialogFooter>
+        <DialogFooter className="pt-1">
           <Button variant="outline" onClick={() => handleOpenChange(false)}>
             Cancel
           </Button>
