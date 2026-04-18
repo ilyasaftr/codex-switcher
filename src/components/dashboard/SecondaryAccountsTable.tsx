@@ -4,6 +4,7 @@ import type { AccountWithUsage } from "@/types";
 import type { AccountGroup } from "@/lib/account-groups";
 import { getAccountVariantLabel, getGroupVisibleAccounts } from "@/lib/account-groups";
 import { formatResetLine } from "@/components/dashboard/secondary-accounts-format";
+import { UsageProgressBar } from "@/components/UsageProgressBar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -34,7 +35,10 @@ function formatRemaining(usedPercent: number | null | undefined) {
 function formatUsage(account: AccountWithUsage) {
   if (account.usageLoading) {
     return {
-      summary: "Syncing",
+      primaryValue: "Syncing",
+      weeklyValue: "Syncing",
+      primaryUsedPercent: null,
+      weeklyUsedPercent: null,
       primaryReset: "Primary reset unavailable",
       weeklyReset: "Weekly reset unavailable",
     };
@@ -42,7 +46,10 @@ function formatUsage(account: AccountWithUsage) {
 
   if (!account.usage || account.usage.error) {
     return {
-      summary: account.usage?.error ? "Unavailable" : "Pending",
+      primaryValue: account.usage?.error ? "Unavailable" : "Pending",
+      weeklyValue: account.usage?.error ? "Unavailable" : "Pending",
+      primaryUsedPercent: null,
+      weeklyUsedPercent: null,
       primaryReset: "Primary reset unavailable",
       weeklyReset: "Weekly reset unavailable",
     };
@@ -52,14 +59,10 @@ function formatUsage(account: AccountWithUsage) {
   const weekly = formatRemaining(account.usage.secondary_used_percent);
 
   return {
-    summary:
-      primary && weekly
-        ? `${primary} primary · ${weekly} weekly`
-        : primary
-          ? `${primary} primary`
-          : weekly
-            ? `${weekly} weekly`
-            : "No data",
+    primaryValue: primary ?? "No data",
+    weeklyValue: weekly ?? "No data",
+    primaryUsedPercent: account.usage.primary_used_percent,
+    weeklyUsedPercent: account.usage.secondary_used_percent,
     primaryReset: formatResetLine("Primary", account.usage.primary_resets_at),
     weeklyReset: formatResetLine("Weekly", account.usage.secondary_resets_at),
   };
@@ -125,15 +128,41 @@ export function SecondaryAccountsTable({
                           </div>
                         </div>
 
-                        <div className="min-w-0 text-sm text-muted-foreground">
-                          <div className="truncate font-medium text-foreground">
-                            {usage.summary}
+                        <div className="min-w-0 space-y-2.5">
+                          <div className="space-y-0.5">
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                                Primary
+                              </span>
+                              <span className="text-sm font-semibold text-foreground">
+                                {usage.primaryValue}
+                              </span>
+                            </div>
+                            <UsageProgressBar
+                              usedPercent={usage.primaryUsedPercent}
+                              size="compact"
+                            />
+                            <div className="text-[11px] leading-5 tracking-[0.02em] text-muted-foreground/80">
+                              {usage.primaryReset}
+                            </div>
                           </div>
-                          <div className="mt-1 text-xs leading-5 tracking-[0.04em]">
-                            {usage.primaryReset}
-                          </div>
-                          <div className="mt-1 text-xs leading-5 tracking-[0.04em]">
-                            {usage.weeklyReset}
+
+                          <div className="space-y-0.5">
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                                Weekly
+                              </span>
+                              <span className="text-sm font-semibold text-foreground">
+                                {usage.weeklyValue}
+                              </span>
+                            </div>
+                            <UsageProgressBar
+                              usedPercent={usage.weeklyUsedPercent}
+                              size="compact"
+                            />
+                            <div className="text-[11px] leading-5 tracking-[0.02em] text-muted-foreground/80">
+                              {usage.weeklyReset}
+                            </div>
                           </div>
                         </div>
 

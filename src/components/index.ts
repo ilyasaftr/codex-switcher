@@ -1,8 +1,10 @@
 export { AccountCard } from "./AccountCard";
 export { UsageBar } from "./UsageBar";
+export { UsageProgressBar } from "./UsageProgressBar";
 export { AddAccountModal } from "./AddAccountModal";
 export { UpdateChecker } from "./UpdateChecker";
 export { AppHeader } from "./dashboard/AppHeader";
+export { PanelActionButton } from "./dashboard/PanelActionButton";
 export { PanelShell } from "./dashboard/PanelShell";
 export { TransferDialog } from "./dashboard/TransferDialog";
 export { SecondaryAccountsTable } from "./dashboard/SecondaryAccountsTable";

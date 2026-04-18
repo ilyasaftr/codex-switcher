@@ -2,9 +2,9 @@ import { ShieldCheck, Trash2, UserCheck } from "lucide-react";
 
 import type { AccountWithUsage } from "@/types";
 import { formatPlanLabel } from "@/lib/account-groups";
+import { PanelActionButton } from "@/components/dashboard/PanelActionButton";
 import { PanelShell } from "@/components/dashboard/PanelShell";
 import { UsageBar } from "@/components/UsageBar";
-import { Button } from "@/components/ui/button";
 
 interface AccountCardProps {
   account: AccountWithUsage;
@@ -57,9 +57,9 @@ export function AccountCard({
       icon={<UserCheck className="size-4" />}
       title="Current"
       action={
-        <Button variant="outline" size="icon" onClick={onDelete} title="Delete account">
+        <PanelActionButton onClick={onDelete} title="Delete account" aria-label="Delete account">
           <Trash2 />
-        </Button>
+        </PanelActionButton>
       }
       className="h-full shadow-[var(--shadow-soft)]"
       contentClassName="space-y-5"

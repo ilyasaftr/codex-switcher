@@ -51,6 +51,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { Toaster } from "@/components/ui/sonner";
+import { panelActionButtonClassName } from "@/components/dashboard/PanelActionButton";
 
 const THEME_STORAGE_KEY = "codex-switcher-theme";
 type ThemeMode = "light" | "dark";
@@ -464,9 +465,10 @@ function App() {
                   >
                     <SelectTrigger
                       aria-label="Sort other accounts"
-                      className="size-10 justify-center rounded-lg border bg-card p-0 shadow-[var(--shadow-soft)] hover:bg-accent hover:text-accent-foreground [&>svg:last-child]:hidden"
+                      title="Sort other accounts"
+                      className={`${panelActionButtonClassName} justify-center p-0 shadow-[var(--shadow-soft)] [&>svg:last-child]:hidden`}
                     >
-                      <SlidersHorizontal className="size-4 opacity-80" />
+                      <SlidersHorizontal />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="reset_asc">Reset: earliest to latest</SelectItem>

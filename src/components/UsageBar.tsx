@@ -1,4 +1,5 @@
 import type { UsageInfo } from "@/types";
+import { UsageProgressBar, getRemainingPercent } from "@/components/UsageProgressBar";
 
 interface UsageBarProps {
   usage?: UsageInfo;
@@ -48,13 +49,7 @@ function RateLimitBar({
   windowMinutes?: number | null;
   resetsAt?: number | null;
 }) {
-  const remainingPercent = Math.max(0, 100 - usedPercent);
-  const colorClass =
-    remainingPercent <= 10
-      ? "bg-red-500"
-      : remainingPercent <= 30
-        ? "bg-amber-500"
-        : "bg-emerald-500";
+  const remainingPercent = getRemainingPercent(usedPercent) ?? 0;
 
   const windowLabel = formatWindowDuration(windowMinutes);
   const resetLabel = formatResetTime(resetsAt);
@@ -74,12 +69,7 @@ function RateLimitBar({
         </div>
       </div>
 
-      <div className="h-2 rounded-full bg-border/60">
-        <div
-          className={`h-2 rounded-full transition-all duration-300 ${colorClass}`}
-          style={{ width: `${Math.min(remainingPercent, 100)}%` }}
-        />
-      </div>
+      <UsageProgressBar usedPercent={usedPercent} />
     </div>
   );
 }
