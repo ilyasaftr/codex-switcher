@@ -55,13 +55,20 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    let had_active_account = load_accounts()
+        .map_err(|e| e.to_string())?
+        .active_account_id
+        .is_some();
+
     // Add the account to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    // Make it active and switch to it
-    set_active_account(&stored.id).map_err(|e| e.to_string())?;
-    switch_to_account(&stored).map_err(|e| e.to_string())?;
-    touch_account(&stored.id).map_err(|e| e.to_string())?;
+    // Keep existing active account unless this is first-account onboarding.
+    if !had_active_account {
+        set_active_account(&stored.id).map_err(|e| e.to_string())?;
+        switch_to_account(&stored).map_err(|e| e.to_string())?;
+        touch_account(&stored.id).map_err(|e| e.to_string())?;
+    }
 
     if let Err(err) = refresh_account_metadata(&stored.id).await {
         println!(

@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 
 use crate::types::{AccountsStore, AuthData, StoredAccount};
 
+const CHATGPT_NAME_SEPARATOR: &str = " \u{00B7} ";
+
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
@@ -66,6 +68,15 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
+
+    let mut account = account;
+
+    if matches!(account.auth_data, AuthData::ChatGPT { .. }) {
+        if is_duplicate_chatgpt_account(&store.accounts, &account) {
+            anyhow::bail!("This ChatGPT account already exists");
+        }
+        account.name = generate_chatgpt_display_name(&store.accounts, &account);
+    }
 
     // Check for duplicate names
     if store.accounts.iter().any(|a| a.name == account.name) {
@@ -293,4 +304,270 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     store.masked_account_ids = ids;
     save_accounts(&store)?;
     Ok(())
+}
+
+fn is_duplicate_chatgpt_account(existing_accounts: &[StoredAccount], candidate: &StoredAccount) -> bool {
+    let AuthData::ChatGPT {
+        refresh_token: candidate_refresh_token,
+        account_id: candidate_account_id,
+        ..
+    } = &candidate.auth_data
+    else {
+        return false;
+    };
+
+    if let (Some(candidate_email), Some(candidate_id)) =
+        (candidate.email.as_deref(), candidate_account_id.as_deref())
+    {
+        return existing_accounts.iter().any(|existing| {
+            let AuthData::ChatGPT {
+                account_id: existing_account_id,
+                ..
+            } = &existing.auth_data
+            else {
+                return false;
+            };
+
+            existing.email.as_deref() == Some(candidate_email)
+                && existing_account_id.as_deref() == Some(candidate_id)
+        });
+    }
+
+    existing_accounts.iter().any(|existing| {
+        let AuthData::ChatGPT {
+            refresh_token: existing_refresh_token,
+            ..
+        } = &existing.auth_data
+        else {
+            return false;
+        };
+
+        existing_refresh_token == candidate_refresh_token
+    })
+}
+
+fn generate_chatgpt_display_name(existing_accounts: &[StoredAccount], candidate: &StoredAccount) -> String {
+    let base = candidate
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| candidate.name.clone());
+
+    if !name_exists(existing_accounts, &base) {
+        return base;
+    }
+
+    if let Some(team_name) = candidate
+        .team_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+    {
+        let team_candidate = format!("{base}{CHATGPT_NAME_SEPARATOR}{team_name}");
+        if !name_exists(existing_accounts, &team_candidate) {
+            return team_candidate;
+        }
+    }
+
+    if let AuthData::ChatGPT {
+        account_id: Some(account_id),
+        ..
+    } = &candidate.auth_data
+    {
+        let id_candidate = format!(
+            "{base}{CHATGPT_NAME_SEPARATOR}{}",
+            shorten_account_id(account_id)
+        );
+        if !name_exists(existing_accounts, &id_candidate) {
+            return id_candidate;
+        }
+    }
+
+    let mut index = 2;
+    loop {
+        let fallback = format!("{base} #{index}");
+        if !name_exists(existing_accounts, &fallback) {
+            return fallback;
+        }
+        index += 1;
+    }
+}
+
+fn shorten_account_id(account_id: &str) -> String {
+    account_id.chars().take(6).collect()
+}
+
+fn name_exists(accounts: &[StoredAccount], name: &str) -> bool {
+    accounts.iter().any(|account| account.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_chatgpt(
+        name: &str,
+        email: Option<&str>,
+        team_name: Option<&str>,
+        account_id: Option<&str>,
+        refresh_token: &str,
+    ) -> StoredAccount {
+        let mut account = StoredAccount::new_chatgpt(
+            name.to_string(),
+            email.map(str::to_string),
+            Some("team".to_string()),
+            format!("id-token-{refresh_token}"),
+            format!("access-token-{refresh_token}"),
+            refresh_token.to_string(),
+            account_id.map(str::to_string),
+        );
+        account.name = name.to_string();
+        account.team_name = team_name.map(str::to_string);
+        account
+    }
+
+    #[test]
+    fn duplicate_chatgpt_uses_email_and_account_id_when_present() {
+        let existing = vec![make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            Some("Team A"),
+            Some("workspace-123"),
+            "refresh-a",
+        )];
+        let candidate = make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            Some("Team B"),
+            Some("workspace-123"),
+            "refresh-b",
+        );
+
+        assert!(is_duplicate_chatgpt_account(&existing, &candidate));
+    }
+
+    #[test]
+    fn same_workspace_id_for_different_email_is_not_duplicate() {
+        let existing = vec![make_chatgpt(
+            "one@example.com",
+            Some("one@example.com"),
+            Some("Team A"),
+            Some("workspace-123"),
+            "refresh-a",
+        )];
+        let candidate = make_chatgpt(
+            "two@example.com",
+            Some("two@example.com"),
+            Some("Team B"),
+            Some("workspace-123"),
+            "refresh-b",
+        );
+
+        assert!(!is_duplicate_chatgpt_account(&existing, &candidate));
+    }
+
+    #[test]
+    fn duplicate_chatgpt_falls_back_to_refresh_token_when_account_id_missing() {
+        let existing = vec![make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            None,
+            Some("workspace-123"),
+            "refresh-a",
+        )];
+        let candidate = make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            None,
+            None,
+            "refresh-a",
+        );
+
+        assert!(is_duplicate_chatgpt_account(&existing, &candidate));
+    }
+
+    #[test]
+    fn same_email_different_workspace_is_not_duplicate() {
+        let existing = vec![make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            Some("Team A"),
+            Some("workspace-aaa"),
+            "refresh-a",
+        )];
+        let candidate = make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            Some("Team B"),
+            Some("workspace-bbb"),
+            "refresh-b",
+        );
+
+        assert!(!is_duplicate_chatgpt_account(&existing, &candidate));
+    }
+
+    #[test]
+    fn name_generation_uses_email_then_workspace_suffix() {
+        let existing = vec![make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            Some("Team A"),
+            Some("workspace-aaa"),
+            "refresh-a",
+        )];
+        let candidate = make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            Some("Team B"),
+            Some("workspace-bbb"),
+            "refresh-b",
+        );
+
+        assert_eq!(
+            generate_chatgpt_display_name(&existing, &candidate),
+            "user@example.com \u{00B7} Team B"
+        );
+    }
+
+    #[test]
+    fn name_generation_falls_back_to_short_account_id_then_counter() {
+        let existing = vec![
+            make_chatgpt(
+                "user@example.com",
+                Some("user@example.com"),
+                None,
+                Some("workspace-aaa111"),
+                "refresh-a",
+            ),
+            make_chatgpt(
+                "user@example.com \u{00B7} worksp",
+                Some("user@example.com"),
+                None,
+                Some("workspace-aaa111"),
+                "refresh-b",
+            ),
+            make_chatgpt(
+                "user@example.com #2",
+                Some("user@example.com"),
+                None,
+                Some("workspace-aaa222"),
+                "refresh-c",
+            ),
+        ];
+
+        let candidate = make_chatgpt(
+            "user@example.com",
+            Some("user@example.com"),
+            None,
+            Some("workspace-aaa111"),
+            "refresh-d",
+        );
+
+        assert_eq!(
+            generate_chatgpt_display_name(&existing, &candidate),
+            "user@example.com #3"
+        );
+    }
 }
