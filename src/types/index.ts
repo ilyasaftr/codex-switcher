@@ -30,6 +30,19 @@ export interface UsageInfo {
   error: string | null;
 }
 
+export type AutoRemovedAccountReason = "token_invalidated" | "deactivated_workspace";
+
+export interface AutoRemovedAccount {
+  account_id: string;
+  reason: AutoRemovedAccountReason;
+  replacement_account_id: string | null;
+}
+
+export interface UsageQueryResult {
+  usage: UsageInfo | null;
+  auto_removed: AutoRemovedAccount | null;
+}
+
 export interface OAuthLoginInfo {
   auth_url: string;
   callback_port: number;
@@ -52,10 +65,20 @@ export interface WarmupSummary {
   total_accounts: number;
   warmed_accounts: number;
   failed_account_ids: string[];
+  auto_removed_accounts: AutoRemovedAccount[];
 }
 
 export interface ImportAccountsSummary {
   total_in_payload: number;
   imported_count: number;
   skipped_count: number;
+}
+
+export interface AccountRefreshResult {
+  account: AccountInfo | null;
+  auto_removed: AutoRemovedAccount | null;
+}
+
+export interface WarmupAccountResult {
+  auto_removed: AutoRemovedAccount | null;
 }

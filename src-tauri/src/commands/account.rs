@@ -6,7 +6,10 @@ use crate::auth::{
     import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
     save_accounts, set_active_account, switch_to_account, touch_account,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountRefreshResult, AccountsStore, AuthData, ImportAccountsSummary,
+    StoredAccount,
+};
 
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -213,10 +216,14 @@ pub async fn rename_account(account_id: String, new_name: String) -> Result<(), 
 
 /// Refresh cached account metadata without refreshing live usage.
 #[tauri::command]
-pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo, String> {
-    let _ = refresh_cached_account_metadata(&account_id)
+pub async fn refresh_account_metadata(account_id: String) -> Result<AccountRefreshResult, String> {
+    let result = refresh_cached_account_metadata(&account_id)
         .await
         .map_err(|e| e.to_string())?;
+
+    if result.auto_removed.is_some() {
+        return Ok(result);
+    }
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
@@ -226,7 +233,10 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
         .find(|account| account.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    Ok(AccountInfo::from_stored(account, active_id))
+    Ok(AccountRefreshResult {
+        account: Some(AccountInfo::from_stored(account, active_id)),
+        auto_removed: None,
+    })
 }
 
 /// Export minimal account config as a compact text string.

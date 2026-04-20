@@ -52,6 +52,19 @@ pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
     Ok(())
 }
 
+/// Remove ~/.codex/auth.json when no active account remains.
+pub fn clear_auth_file() -> Result<()> {
+    let auth_path = get_codex_auth_file()?;
+    if !auth_path.exists() {
+        return Ok(());
+    }
+
+    fs::remove_file(&auth_path)
+        .with_context(|| format!("Failed to remove auth.json: {}", auth_path.display()))?;
+
+    Ok(())
+}
+
 /// Create an AuthDotJson structure from a StoredAccount
 fn create_auth_json(account: &StoredAccount) -> Result<AuthDotJson> {
     match &account.auth_data {

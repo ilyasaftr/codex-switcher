@@ -251,6 +251,53 @@ impl UsageInfo {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoRemovedAccountReason {
+    TokenInvalidated,
+    DeactivatedWorkspace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoRemovedAccount {
+    pub account_id: String,
+    pub reason: AutoRemovedAccountReason,
+    pub replacement_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageQueryResult {
+    pub usage: Option<UsageInfo>,
+    pub auto_removed: Option<AutoRemovedAccount>,
+}
+
+impl UsageQueryResult {
+    pub fn success(usage: UsageInfo) -> Self {
+        Self {
+            usage: Some(usage),
+            auto_removed: None,
+        }
+    }
+
+    pub fn auto_removed(auto_removed: AutoRemovedAccount) -> Self {
+        Self {
+            usage: None,
+            auto_removed: Some(auto_removed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountRefreshResult {
+    pub account: Option<AccountInfo>,
+    pub auto_removed: Option<AutoRemovedAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupAccountResult {
+    pub auto_removed: Option<AutoRemovedAccount>,
+}
+
 /// Warm-up execution summary across accounts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WarmupSummary {
@@ -260,6 +307,9 @@ pub struct WarmupSummary {
     pub warmed_accounts: usize,
     /// Account IDs whose warm-up request failed
     pub failed_account_ids: Vec<String>,
+    /// Accounts that were auto-removed because their ChatGPT auth became unusable
+    #[serde(default)]
+    pub auto_removed_accounts: Vec<AutoRemovedAccount>,
 }
 
 /// Import summary for account config import operations.

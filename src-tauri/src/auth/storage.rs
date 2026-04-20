@@ -6,9 +6,16 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
+use crate::auth::{clear_auth_file, switch_to_account};
 use crate::types::{AccountsStore, AuthData, StoredAccount};
 
 const CHATGPT_NAME_SEPARATOR: &str = " \u{00B7} ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRemovalResult {
+    pub removed_was_active: bool,
+    pub replacement_account_id: Option<String>,
+}
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -95,24 +102,22 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     Ok(account_clone)
 }
 
-/// Remove an account by ID
-pub fn remove_account(account_id: &str) -> Result<()> {
+/// Remove an account by ID and keep ~/.codex/auth.json aligned when active account changes.
+pub fn remove_account(account_id: &str) -> Result<AccountRemovalResult> {
     let mut store = load_accounts()?;
-
-    let initial_len = store.accounts.len();
-    store.accounts.retain(|a| a.id != account_id);
-
-    if store.accounts.len() == initial_len {
-        anyhow::bail!("Account not found: {account_id}");
-    }
-
-    // If we removed the active account, clear it or set to first available
-    if store.active_account_id.as_deref() == Some(account_id) {
-        store.active_account_id = store.accounts.first().map(|a| a.id.clone());
-    }
+    let (result, replacement_account) = remove_account_from_store(&mut store, account_id)?;
 
     save_accounts(&store)?;
-    Ok(())
+
+    if result.removed_was_active {
+        if let Some(account) = replacement_account {
+            switch_to_account(&account)?;
+        } else {
+            clear_auth_file()?;
+        }
+    }
+
+    Ok(result)
 }
 
 /// Update the active account ID
@@ -403,6 +408,37 @@ fn name_exists(accounts: &[StoredAccount], name: &str) -> bool {
     accounts.iter().any(|account| account.name == name)
 }
 
+fn remove_account_from_store(
+    store: &mut AccountsStore,
+    account_id: &str,
+) -> Result<(AccountRemovalResult, Option<StoredAccount>)> {
+    let removed_was_active = store.active_account_id.as_deref() == Some(account_id);
+
+    let initial_len = store.accounts.len();
+    store.accounts.retain(|account| account.id != account_id);
+
+    if store.accounts.len() == initial_len {
+        anyhow::bail!("Account not found: {account_id}");
+    }
+
+    let replacement_account = if removed_was_active {
+        store.accounts.first().cloned()
+    } else {
+        None
+    };
+
+    if removed_was_active {
+        store.active_account_id = replacement_account.as_ref().map(|account| account.id.clone());
+    }
+
+    let result = AccountRemovalResult {
+        removed_was_active,
+        replacement_account_id: replacement_account.as_ref().map(|account| account.id.clone()),
+    };
+
+    Ok((result, replacement_account))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +605,40 @@ mod tests {
             generate_chatgpt_display_name(&existing, &candidate),
             "user@example.com #3"
         );
+    }
+
+    #[test]
+    fn remove_account_promotes_first_remaining_active_account() {
+        let mut store = AccountsStore {
+            version: 1,
+            accounts: vec![
+                make_chatgpt(
+                    "one@example.com",
+                    Some("one@example.com"),
+                    Some("Team A"),
+                    Some("workspace-aaa"),
+                    "refresh-a",
+                ),
+                make_chatgpt(
+                    "two@example.com",
+                    Some("two@example.com"),
+                    Some("Team B"),
+                    Some("workspace-bbb"),
+                    "refresh-b",
+                ),
+            ],
+            active_account_id: None,
+            masked_account_ids: Vec::new(),
+        };
+        let removed_id = store.accounts[0].id.clone();
+        let expected_next_id = store.accounts[1].id.clone();
+        store.active_account_id = Some(removed_id.clone());
+
+        let (result, _) = remove_account_from_store(&mut store, &removed_id).unwrap();
+
+        assert!(result.removed_was_active);
+        assert_eq!(result.replacement_account_id.as_deref(), Some(expected_next_id.as_str()));
+        assert_eq!(store.active_account_id.as_deref(), Some(expected_next_id.as_str()));
+        assert_eq!(store.accounts.len(), 1);
     }
 }

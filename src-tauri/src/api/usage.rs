@@ -11,11 +11,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{
-    ensure_chatgpt_tokens_fresh, get_account, refresh_chatgpt_tokens, update_account_team_metadata,
+    ensure_chatgpt_tokens_fresh, get_account, refresh_chatgpt_tokens, remove_account,
+    update_account_team_metadata,
 };
 use crate::types::{
-    AuthData, CreditStatusDetails, RateLimitDetails, RateLimitStatusPayload, RateLimitWindow,
-    StoredAccount, UsageInfo,
+    AccountRefreshResult, AutoRemovedAccount, AutoRemovedAccountReason, AuthData,
+    CreditStatusDetails, RateLimitDetails, RateLimitStatusPayload, RateLimitWindow, StoredAccount,
+    UsageInfo, UsageQueryResult, WarmupAccountResult,
 };
 
 const CHATGPT_BACKEND_API: &str = "https://chatgpt.com/backend-api";
@@ -45,14 +47,19 @@ struct AccountsCheckAccount {
     name: Option<String>,
 }
 
+pub(crate) enum ChatgptRequestOutcome<T> {
+    Success(T),
+    AutoRemoved(AutoRemovedAccount),
+}
+
 /// Get usage information for an account
-pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
+pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageQueryResult> {
     println!("[Usage] Fetching usage for account: {}", account.name);
 
     match &account.auth_data {
         AuthData::ApiKey { .. } => {
             println!("[Usage] API key accounts don't support usage info");
-            Ok(UsageInfo {
+            Ok(UsageQueryResult::success(UsageInfo {
                 account_id: account.id.clone(),
                 plan_type: Some("api_key".to_string()),
                 primary_used_percent: None,
@@ -65,69 +72,77 @@ pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
                 unlimited_credits: None,
                 credits_balance: None,
                 error: Some("Usage info not available for API key accounts".to_string()),
-            })
+            }))
         }
         AuthData::ChatGPT { .. } => get_usage_with_chatgpt_auth(account).await,
     }
 }
 
 /// Send a minimal authenticated request to warm up account traffic paths.
-pub async fn warmup_account(account: &StoredAccount) -> Result<()> {
+pub async fn warmup_account(account: &StoredAccount) -> Result<WarmupAccountResult> {
     println!(
         "[Warmup] Sending warm-up request for account: {}",
         account.name
     );
 
     match &account.auth_data {
-        AuthData::ApiKey { key } => warmup_with_api_key(key).await,
+        AuthData::ApiKey { key } => {
+            warmup_with_api_key(key).await?;
+            Ok(WarmupAccountResult { auto_removed: None })
+        }
         AuthData::ChatGPT { .. } => warmup_with_chatgpt_auth(account).await,
     }
 }
 
 /// Refresh and persist cached account metadata for one stored ChatGPT account.
-pub async fn refresh_account_metadata(account_id: &str) -> Result<Option<AccountMetadata>> {
+pub async fn refresh_account_metadata(account_id: &str) -> Result<AccountRefreshResult> {
     let account = get_account(account_id)?
         .ok_or_else(|| anyhow::anyhow!("Account not found: {account_id}"))?;
 
     match &account.auth_data {
-        AuthData::ApiKey { .. } => Ok(None),
+        AuthData::ApiKey { .. } => Ok(AccountRefreshResult {
+            account: None,
+            auto_removed: None,
+        }),
         AuthData::ChatGPT { .. } => {
-            let fresh_account = ensure_chatgpt_tokens_fresh(&account).await?;
-            let metadata = fetch_account_metadata_for_account(&fresh_account).await?;
-            update_account_team_metadata(
-                &fresh_account.id,
-                metadata.email.clone(),
-                metadata.plan_type.clone(),
-                metadata.team_name.clone(),
-                Utc::now(),
-            )?;
-            Ok(Some(metadata))
+            let fresh_account = match prepare_chatgpt_account_for_request(&account).await? {
+                ChatgptRequestOutcome::Success(account) => account,
+                ChatgptRequestOutcome::AutoRemoved(auto_removed) => {
+                    return Ok(AccountRefreshResult {
+                        account: None,
+                        auto_removed: Some(auto_removed),
+                    });
+                }
+            };
+
+            match fetch_account_metadata_for_account(&fresh_account).await? {
+                ChatgptRequestOutcome::Success(metadata) => {
+                    let updated = update_account_team_metadata(
+                        &fresh_account.id,
+                        metadata.email.clone(),
+                        metadata.plan_type.clone(),
+                        metadata.team_name.clone(),
+                        Utc::now(),
+                    )?;
+                    Ok(AccountRefreshResult {
+                        account: Some(crate::types::AccountInfo::from_stored(&updated, None)),
+                        auto_removed: None,
+                    })
+                }
+                ChatgptRequestOutcome::AutoRemoved(auto_removed) => Ok(AccountRefreshResult {
+                    account: None,
+                    auto_removed: Some(auto_removed),
+                }),
+            }
         }
     }
 }
 
-pub async fn fetch_account_metadata_for_account(
+pub(crate) async fn fetch_account_metadata_for_account(
     account: &StoredAccount,
-) -> Result<AccountMetadata> {
+) -> Result<ChatgptRequestOutcome<AccountMetadata>> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
     let response = send_chatgpt_accounts_check_request(access_token, chatgpt_account_id).await?;
-
-    if response.status() == StatusCode::UNAUTHORIZED {
-        println!(
-            "[Metadata] Unauthorized for account {}, refreshing token and retrying once",
-            account.name
-        );
-        let refreshed_account = refresh_chatgpt_tokens(account).await?;
-        return fetch_account_metadata_from_response(
-            &refreshed_account,
-            send_chatgpt_accounts_check_request(
-                extract_chatgpt_auth(&refreshed_account)?.0,
-                extract_chatgpt_auth(&refreshed_account)?.1,
-            )
-            .await?,
-        )
-        .await;
-    }
 
     fetch_account_metadata_from_response(account, response).await
 }
@@ -135,11 +150,16 @@ pub async fn fetch_account_metadata_for_account(
 async fn fetch_account_metadata_from_response(
     account: &StoredAccount,
     response: reqwest::Response,
-) -> Result<AccountMetadata> {
+) -> Result<ChatgptRequestOutcome<AccountMetadata>> {
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         println!("[Metadata] Error response: {body}");
+        if let Some(reason) = detect_invalid_chatgpt_account_reason(&body) {
+            return Ok(ChatgptRequestOutcome::AutoRemoved(
+                auto_remove_invalid_account(account, reason)?,
+            ));
+        }
         anyhow::bail!("Account metadata request failed with status {status}");
     }
 
@@ -155,53 +175,48 @@ async fn fetch_account_metadata_from_response(
         AuthData::ApiKey { .. } => None,
     };
 
-    Ok(build_account_metadata(
+    Ok(ChatgptRequestOutcome::Success(build_account_metadata(
         account.email.clone(),
         account.plan_type.clone(),
         account_id,
         payload,
-    ))
+    )))
 }
 
-async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageInfo> {
-    let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
+async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageQueryResult> {
+    let fresh_account = match prepare_chatgpt_account_for_request(account).await? {
+        ChatgptRequestOutcome::Success(account) => account,
+        ChatgptRequestOutcome::AutoRemoved(auto_removed) => {
+            return Ok(UsageQueryResult::auto_removed(auto_removed));
+        }
+    };
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
     let response = send_chatgpt_usage_request(access_token, chatgpt_account_id).await?;
-    if response.status() == StatusCode::UNAUTHORIZED {
-        println!(
-            "[Usage] Unauthorized for account {}, refreshing token and retrying once",
-            fresh_account.name
-        );
-        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
-        let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
-        let retry_response = send_chatgpt_usage_request(retry_token, retry_account_id).await?;
-        return parse_usage_response(
-            &refreshed_account.id,
-            &refreshed_account.name,
-            retry_response,
-        )
-        .await;
-    }
-
-    parse_usage_response(&fresh_account.id, &fresh_account.name, response).await
+    parse_usage_response(&fresh_account.id, &fresh_account.name, &fresh_account, response).await
 }
 
 async fn parse_usage_response(
     account_id: &str,
     account_name: &str,
+    account: &StoredAccount,
     response: reqwest::Response,
-) -> Result<UsageInfo> {
+) -> Result<UsageQueryResult> {
     let status = response.status();
     println!("[Usage] Response status: {status}");
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         println!("[Usage] Error response: {body}");
-        return Ok(UsageInfo::error(
+        if let Some(reason) = detect_invalid_chatgpt_account_reason(&body) {
+            return Ok(UsageQueryResult::auto_removed(auto_remove_invalid_account(
+                account, reason,
+            )?));
+        }
+        return Ok(UsageQueryResult::success(UsageInfo::error(
             account_id.to_string(),
             format!("API error: {status}"),
-        ));
+        )));
     }
 
     let body_text = response
@@ -224,35 +239,54 @@ async fn parse_usage_response(
         account_name, usage.primary_used_percent, usage.plan_type
     );
 
-    Ok(usage)
+    Ok(UsageQueryResult::success(usage))
 }
 
-async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
-    let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
+async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<WarmupAccountResult> {
+    let fresh_account = match prepare_chatgpt_account_for_request(account).await? {
+        ChatgptRequestOutcome::Success(account) => account,
+        ChatgptRequestOutcome::AutoRemoved(auto_removed) => {
+            return Ok(WarmupAccountResult {
+                auto_removed: Some(auto_removed),
+            });
+        }
+    };
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
-    let mut response = send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
-    if response.status() == StatusCode::UNAUTHORIZED {
-        println!(
-            "[Warmup] Unauthorized for account {}, refreshing token and retrying once",
-            fresh_account.name
-        );
-        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
-        let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
-        response = send_chatgpt_warmup_request(retry_token, retry_account_id, true).await?;
-    }
+    let response = send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         println!("[Warmup] ChatGPT warm-up error response: {body}");
+        if let Some(reason) = detect_invalid_chatgpt_account_reason(&body) {
+            return Ok(WarmupAccountResult {
+                auto_removed: Some(auto_remove_invalid_account(account, reason)?),
+            });
+        }
         anyhow::bail!("ChatGPT warm-up failed with status {status}");
     }
 
     let body = response.text().await.unwrap_or_default();
     log_warmup_response("ChatGPT", &body, true);
 
-    Ok(())
+    Ok(WarmupAccountResult { auto_removed: None })
+}
+
+async fn prepare_chatgpt_account_for_request(
+    account: &StoredAccount,
+) -> Result<ChatgptRequestOutcome<StoredAccount>> {
+    match ensure_chatgpt_tokens_fresh(account).await {
+        Ok(account) => Ok(ChatgptRequestOutcome::Success(account)),
+        Err(err) => {
+            if let Some(reason) = detect_invalid_chatgpt_account_reason_in_error(&err) {
+                return Ok(ChatgptRequestOutcome::AutoRemoved(
+                    auto_remove_invalid_account(account, reason)?,
+                ));
+            }
+            Err(err)
+        }
+    }
 }
 
 async fn warmup_with_api_key(api_key: &str) -> Result<()> {
@@ -549,17 +583,17 @@ fn build_account_metadata(
 }
 
 /// Refresh all account usage
-pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
+pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageQueryResult> {
     println!("[Usage] Refreshing usage for {} accounts", accounts.len());
 
     let concurrency = accounts.len().min(10).max(1);
-    let results: Vec<UsageInfo> = stream::iter(accounts.iter().cloned())
+    let results: Vec<UsageQueryResult> = stream::iter(accounts.iter().cloned())
         .map(|account| async move {
             match get_account_usage(&account).await {
                 Ok(info) => info,
                 Err(e) => {
                     println!("[Usage] Error for {}: {}", account.name, e);
-                    UsageInfo::error(account.id.clone(), e.to_string())
+                    UsageQueryResult::success(UsageInfo::error(account.id.clone(), e.to_string()))
                 }
             }
         })
@@ -571,9 +605,82 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
     results
 }
 
+fn detect_invalid_chatgpt_account_reason(body: &str) -> Option<AutoRemovedAccountReason> {
+    let payload: Value = serde_json::from_str(body).ok()?;
+
+    match payload
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+    {
+        Some("token_invalidated") => return Some(AutoRemovedAccountReason::TokenInvalidated),
+        _ => {}
+    }
+
+    match payload
+        .get("detail")
+        .and_then(|detail| detail.get("code"))
+        .and_then(Value::as_str)
+    {
+        Some("deactivated_workspace") => Some(AutoRemovedAccountReason::DeactivatedWorkspace),
+        _ => None,
+    }
+}
+
+fn detect_invalid_chatgpt_account_reason_in_error(
+    error: &anyhow::Error,
+) -> Option<AutoRemovedAccountReason> {
+    for message in error.chain().map(|item| item.to_string()) {
+        if let Some(reason) = detect_invalid_chatgpt_account_reason_in_text(&message) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn detect_invalid_chatgpt_account_reason_in_text(
+    text: &str,
+) -> Option<AutoRemovedAccountReason> {
+    if let Some(reason) = detect_invalid_chatgpt_account_reason(text) {
+        return Some(reason);
+    }
+
+    if let Some((_, body)) = text.split_once(" - ") {
+        if let Some(reason) = detect_invalid_chatgpt_account_reason(body) {
+            return Some(reason);
+        }
+    }
+
+    if text.contains("token_invalidated") {
+        return Some(AutoRemovedAccountReason::TokenInvalidated);
+    }
+
+    if text.contains("deactivated_workspace") {
+        return Some(AutoRemovedAccountReason::DeactivatedWorkspace);
+    }
+
+    None
+}
+
+fn auto_remove_invalid_account(
+    account: &StoredAccount,
+    reason: AutoRemovedAccountReason,
+) -> Result<AutoRemovedAccount> {
+    let removal = remove_account(&account.id)?;
+    Ok(AutoRemovedAccount {
+        account_id: account.id.clone(),
+        reason,
+        replacement_account_id: removal.replacement_account_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_account_metadata, AccountMetadata, AccountsCheckResponse};
+    use super::{
+        build_account_metadata, detect_invalid_chatgpt_account_reason,
+        detect_invalid_chatgpt_account_reason_in_text, AccountMetadata, AccountsCheckResponse,
+    };
+    use crate::types::AutoRemovedAccountReason;
 
     #[test]
     fn account_metadata_uses_matching_team_workspace_name() {
@@ -624,5 +731,62 @@ mod tests {
 
         assert_eq!(metadata.team_name, None);
         assert_eq!(metadata.plan_type.as_deref(), Some("free"));
+    }
+
+    #[test]
+    fn detects_token_invalidated_as_auto_remove_reason() {
+        let body = r#"{
+            "error": {
+                "message": "Your authentication token has been invalidated. Please try signing in again.",
+                "type": "invalid_request_error",
+                "code": "token_invalidated",
+                "param": null
+            },
+            "status": 401
+        }"#;
+
+        assert_eq!(
+            detect_invalid_chatgpt_account_reason(body),
+            Some(AutoRemovedAccountReason::TokenInvalidated)
+        );
+    }
+
+    #[test]
+    fn detects_deactivated_workspace_as_auto_remove_reason() {
+        let body = r#"{
+            "detail": {
+                "code": "deactivated_workspace"
+            }
+        }"#;
+
+        assert_eq!(
+            detect_invalid_chatgpt_account_reason(body),
+            Some(AutoRemovedAccountReason::DeactivatedWorkspace)
+        );
+    }
+
+    #[test]
+    fn ignores_generic_auth_failures_for_auto_remove() {
+        let body = r#"{
+            "error": {
+                "message": "Unauthorized",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+                "param": null
+            },
+            "status": 401
+        }"#;
+
+        assert_eq!(detect_invalid_chatgpt_account_reason(body), None);
+    }
+
+    #[test]
+    fn detects_invalid_reason_inside_refresh_error_text() {
+        let text = r#"Token refresh failed: 401 Unauthorized - {"error":{"message":"Your authentication token has been invalidated. Please try signing in again.","type":"invalid_request_error","code":"token_invalidated","param":null},"status":401}"#;
+
+        assert_eq!(
+            detect_invalid_chatgpt_account_reason_in_text(text),
+            Some(AutoRemovedAccountReason::TokenInvalidated)
+        );
     }
 }

@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { toast } from "sonner";
 import type {
   AccountInfo,
+  AccountRefreshResult,
+  AutoRemovedAccount,
   UsageInfo,
+  UsageQueryResult,
   AccountWithUsage,
+  WarmupAccountResult,
   WarmupSummary,
   ImportAccountsSummary,
 } from "../types";
@@ -14,6 +19,7 @@ export function useAccounts() {
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
+  const handledAutoRemovedRef = useRef<Set<string>>(new Set());
   const maxConcurrentUsageRequests = 10;
   const maxConcurrentMetadataRequests = 4;
 
@@ -49,6 +55,20 @@ export function useAccounts() {
       credits_balance: null,
       error: message,
     }),
+    []
+  );
+
+  const formatAutoRemovedMessage = useCallback(
+    (autoRemoved: AutoRemovedAccount, currentAccounts: AccountWithUsage[]) => {
+      const account = currentAccounts.find((item) => item.id === autoRemoved.account_id);
+      const label = account?.email ?? account?.name ?? "Account";
+
+      if (autoRemoved.reason === "token_invalidated") {
+        return `${label} was removed because its authentication token was invalidated. Sign in again.`;
+      }
+
+      return `${label} was removed because its workspace is deactivated.`;
+    },
     []
   );
 
@@ -104,6 +124,35 @@ export function useAccounts() {
     }
   }, []);
 
+  const handleAutoRemovedAccounts = useCallback(
+    async (autoRemoved: AutoRemovedAccount | AutoRemovedAccount[] | null | undefined) => {
+      const removals = Array.isArray(autoRemoved)
+        ? autoRemoved
+        : autoRemoved
+          ? [autoRemoved]
+          : [];
+
+      if (removals.length === 0) {
+        return accountsRef.current;
+      }
+
+      const currentAccounts = accountsRef.current;
+      const uniqueRemovals = removals.filter((removal, index, list) => {
+        return list.findIndex((item) => item.account_id === removal.account_id) === index;
+      });
+
+      for (const removal of uniqueRemovals) {
+        const key = `${removal.account_id}:${removal.reason}`;
+        if (handledAutoRemovedRef.current.has(key)) continue;
+        handledAutoRemovedRef.current.add(key);
+        toast.error(formatAutoRemovedMessage(removal, currentAccounts));
+      }
+
+      return loadAccounts(true);
+    },
+    [formatAutoRemovedMessage, loadAccounts]
+  );
+
   const upsertAccount = useCallback(
     (nextAccount: AccountInfo) => {
       setAccounts((prev) => {
@@ -123,63 +172,88 @@ export function useAccounts() {
 
   const refreshUsage = useCallback(
     async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
-    try {
-      const list = accountList ?? accountsRef.current;
-      if (list.length === 0) {
-        return;
+      try {
+        const list = accountList ?? accountsRef.current;
+        if (list.length === 0) {
+          return;
+        }
+
+        const accountIds = list.map((account) => account.id);
+        const accountIdSet = new Set(accountIds);
+        const autoRemoved: AutoRemovedAccount[] = [];
+
+        setAccounts((prev) =>
+          prev.map((account) =>
+            accountIdSet.has(account.id)
+              ? { ...account, usageLoading: true }
+              : account
+          )
+        );
+
+        await runWithConcurrency(
+          accountIds,
+          async (accountId) => {
+            try {
+              const result = await invokeBackend<UsageQueryResult>("get_usage", { accountId });
+              if (result.auto_removed) {
+                autoRemoved.push(result.auto_removed);
+                return;
+              }
+
+              if (!result.usage) {
+                return;
+              }
+
+              setAccounts((prev) =>
+                prev.map((account) =>
+                  account.id === accountId
+                    ? {
+                        ...account,
+                        usage: result.usage ?? undefined,
+                        usageLoading: false,
+                        usageError: null,
+                      }
+                    : account
+                )
+              );
+            } catch (err) {
+              console.error("Failed to refresh usage:", err);
+              const message = err instanceof Error ? err.message : String(err);
+              setAccounts((prev) =>
+                prev.map((account) =>
+                  account.id === accountId
+                    ? {
+                        ...account,
+                        usage:
+                          account.usage ??
+                          buildUsageError(accountId, message, account.plan_type ?? null),
+                        usageLoading: false,
+                        usageError: message,
+                      }
+                    : account
+                )
+              );
+            }
+          },
+          maxConcurrentUsageRequests
+        );
+
+        if (autoRemoved.length > 0) {
+          await handleAutoRemovedAccounts(autoRemoved);
+        }
+
+        setLastRefreshedAt(new Date().toISOString());
+      } catch (err) {
+        console.error("Failed to refresh usage:", err);
+        throw err;
       }
-
-      const accountIds = list.map((account) => account.id);
-      const accountIdSet = new Set(accountIds);
-
-      setAccounts((prev) =>
-        prev.map((account) =>
-          accountIdSet.has(account.id)
-            ? { ...account, usageLoading: true }
-            : account
-        )
-      );
-
-      await runWithConcurrency(
-        accountIds,
-        async (accountId) => {
-          try {
-            const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
-            setAccounts((prev) =>
-              prev.map((account) =>
-                account.id === accountId
-                  ? { ...account, usage, usageLoading: false, usageError: null }
-                  : account
-              )
-            );
-          } catch (err) {
-            console.error("Failed to refresh usage:", err);
-            const message = err instanceof Error ? err.message : String(err);
-            setAccounts((prev) =>
-              prev.map((account) =>
-                account.id === accountId
-                  ? {
-                      ...account,
-                      usage:
-                        account.usage ??
-                        buildUsageError(accountId, message, account.plan_type ?? null),
-                      usageLoading: false,
-                      usageError: message,
-                    }
-                  : account
-              )
-            );
-          }
-        },
-        maxConcurrentUsageRequests
-      );
-      setLastRefreshedAt(new Date().toISOString());
-    } catch (err) {
-      console.error("Failed to refresh usage:", err);
-      throw err;
-    }
     },
-    [buildUsageError, maxConcurrentUsageRequests, runWithConcurrency]
+    [
+      buildUsageError,
+      handleAutoRemovedAccounts,
+      maxConcurrentUsageRequests,
+      runWithConcurrency,
+    ]
   );
 
   const refreshSingleUsage = useCallback(async (accountId: string) => {
@@ -189,10 +263,19 @@ export function useAccounts() {
           a.id === accountId ? { ...a, usageLoading: true } : a
         )
       );
-      const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
+      const result = await invokeBackend<UsageQueryResult>("get_usage", { accountId });
+      if (result.auto_removed) {
+        await handleAutoRemovedAccounts(result.auto_removed);
+        return;
+      }
+      if (!result.usage) {
+        return;
+      }
       setAccounts((prev) =>
         prev.map((a) =>
-          a.id === accountId ? { ...a, usage, usageLoading: false, usageError: null } : a
+          a.id === accountId
+            ? { ...a, usage: result.usage ?? undefined, usageLoading: false, usageError: null }
+            : a
         )
       );
     } catch (err) {
@@ -212,15 +295,24 @@ export function useAccounts() {
       );
       throw err;
     }
-  }, [buildUsageError]);
+  }, [buildUsageError, handleAutoRemovedAccounts]);
 
   const refreshAccountMetadata = useCallback(
     async (accountId: string) => {
-      const account = await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
-      upsertAccount(account);
-      return account;
+      const result = await invokeBackend<AccountRefreshResult>("refresh_account_metadata", {
+        accountId,
+      });
+      if (result.auto_removed) {
+        await handleAutoRemovedAccounts(result.auto_removed);
+        return null;
+      }
+      if (!result.account) {
+        return null;
+      }
+      upsertAccount(result.account);
+      return result.account;
     },
-    [upsertAccount]
+    [handleAutoRemovedAccounts, upsertAccount]
   );
 
   const refreshAccountsMetadata = useCallback(
@@ -237,19 +329,36 @@ export function useAccounts() {
         })
         .map((account) => account.id);
 
+      const autoRemoved: AutoRemovedAccount[] = [];
+
       await runWithConcurrency(
         targetIds,
         async (accountId) => {
           try {
-            await refreshAccountMetadata(accountId);
+            const result = await invokeBackend<AccountRefreshResult>("refresh_account_metadata", {
+              accountId,
+            });
+            if (result.auto_removed) {
+              autoRemoved.push(result.auto_removed);
+              return;
+            }
+            if (result.account) {
+              upsertAccount(result.account);
+            }
           } catch (err) {
             console.error("Failed to refresh account metadata:", err);
           }
         },
         maxConcurrentMetadataRequests
       );
+
+      if (autoRemoved.length > 0) {
+        return handleAutoRemovedAccounts(autoRemoved);
+      }
+
+      return accountsRef.current;
     },
-    [refreshAccountMetadata, runWithConcurrency]
+    [handleAutoRemovedAccounts, maxConcurrentMetadataRequests, runWithConcurrency, upsertAccount]
   );
 
   const refreshAccount = useCallback(
@@ -268,29 +377,36 @@ export function useAccounts() {
   const refreshAllAccounts = useCallback(
     async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
       const list = accountList ?? accountsRef.current;
-      await refreshAccountsMetadata(list);
-      await refreshUsage(list);
+      const nextList = await refreshAccountsMetadata(list);
+      await refreshUsage(nextList);
     },
     [refreshAccountsMetadata, refreshUsage]
   );
 
   const warmupAccount = useCallback(async (accountId: string) => {
     try {
-      await invokeBackend("warmup_account", { accountId });
+      const result = await invokeBackend<WarmupAccountResult>("warmup_account", { accountId });
+      if (result.auto_removed) {
+        await handleAutoRemovedAccounts(result.auto_removed);
+      }
     } catch (err) {
       console.error("Failed to warm up account:", err);
       throw err;
     }
-  }, []);
+  }, [handleAutoRemovedAccounts]);
 
   const warmupAllAccounts = useCallback(async () => {
     try {
-      return await invokeBackend<WarmupSummary>("warmup_all_accounts");
+      const summary = await invokeBackend<WarmupSummary>("warmup_all_accounts");
+      if (summary.auto_removed_accounts.length > 0) {
+        await handleAutoRemovedAccounts(summary.auto_removed_accounts);
+      }
+      return summary;
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
       throw err;
     }
-  }, []);
+  }, [handleAutoRemovedAccounts]);
 
   const switchAccount = useCallback(
     async (accountId: string) => {

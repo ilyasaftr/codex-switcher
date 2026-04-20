@@ -6,7 +6,7 @@ use chrono::Utc;
 use tokio::time::{sleep, Duration};
 
 use super::{load_accounts, switch_to_account, update_account_chatgpt_tokens};
-use crate::api::fetch_account_metadata_for_account;
+use crate::api::{fetch_account_metadata_for_account, ChatgptRequestOutcome};
 use crate::types::{AuthData, StoredAccount};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
@@ -115,7 +115,9 @@ pub async fn create_chatgpt_account_from_refresh_token(
         account_id,
     );
 
-    if let Ok(metadata) = fetch_account_metadata_for_account(&account).await {
+    if let Ok(ChatgptRequestOutcome::Success(metadata)) =
+        fetch_account_metadata_for_account(&account).await
+    {
         account.team_name = metadata.team_name;
         account.team_info_updated_at = Some(Utc::now());
         if let Some(plan_type) = metadata.plan_type {

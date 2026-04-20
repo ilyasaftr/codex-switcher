@@ -29,7 +29,6 @@ import {
   PanelShell,
   SecondaryAccountsTable,
   TransferDialog,
-  UpdateChecker,
 } from "@/components";
 import type { SecondaryAccountsSort } from "@/components/dashboard/SecondaryAccountsTable";
 import {
@@ -658,8 +657,6 @@ function App() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <UpdateChecker />
       <Toaster theme={themeMode} position="bottom-right" />
     </div>
   );
