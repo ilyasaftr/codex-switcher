@@ -108,11 +108,6 @@ export function UsageBar({ usage, loading, error }: UsageBarProps) {
 
   return (
     <div className="space-y-3">
-      {loading ? (
-        <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-          Syncing latest usage
-        </div>
-      ) : null}
       {hasPrimary ? (
         <RateLimitBar
           label="Primary Window"

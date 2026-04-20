@@ -33,18 +33,18 @@ function formatRemaining(usedPercent: number | null | undefined) {
 }
 
 function formatUsage(account: AccountWithUsage) {
-  if (account.usageLoading) {
-    return {
-      primaryValue: "Syncing",
-      weeklyValue: "Syncing",
-      primaryUsedPercent: null,
-      weeklyUsedPercent: null,
-      primaryReset: "Primary reset unavailable",
-      weeklyReset: "Weekly reset unavailable",
-    };
-  }
-
   if (!account.usage || account.usage.error) {
+    if (account.usageLoading) {
+      return {
+        primaryValue: "Syncing",
+        weeklyValue: "Syncing",
+        primaryUsedPercent: null,
+        weeklyUsedPercent: null,
+        primaryReset: "Primary reset unavailable",
+        weeklyReset: "Weekly reset unavailable",
+      };
+    }
+
     return {
       primaryValue: account.usage?.error ? "Unavailable" : "Pending",
       weeklyValue: account.usage?.error ? "Unavailable" : "Pending",

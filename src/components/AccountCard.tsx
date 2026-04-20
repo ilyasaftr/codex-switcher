@@ -79,7 +79,7 @@ export function AccountCard({
             <ShieldCheck className="size-4 text-muted-foreground" />
             Usage Windows
           </div>
-          {account.usageLoading ? (
+          {account.usageLoading && !account.usage ? (
             <span className="rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
               Syncing
             </span>
