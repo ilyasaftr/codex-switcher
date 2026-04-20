@@ -9,6 +9,7 @@ import type {
   AccountWithUsage,
   WarmupAccountResult,
   WarmupSummary,
+  ForceSwitchResult,
   ImportAccountsSummary,
 } from "../types";
 import { invokeBackend, type FileSource } from "../lib/platform";
@@ -420,6 +421,21 @@ export function useAccounts() {
     [loadAccounts]
   );
 
+  const forceSwitchAccount = useCallback(
+    async (accountId: string) => {
+      try {
+        const result = await invokeBackend<ForceSwitchResult>("force_switch_account", {
+          accountId,
+        });
+        await loadAccounts(true);
+        return result;
+      } catch (err) {
+        throw err;
+      }
+    },
+    [loadAccounts]
+  );
+
   const deleteAccount = useCallback(
     async (accountId: string) => {
       try {
@@ -576,6 +592,7 @@ export function useAccounts() {
     warmupAccount,
     warmupAllAccounts,
     switchAccount,
+    forceSwitchAccount,
     deleteAccount,
     importFromFile,
     exportAccountsSlimText,

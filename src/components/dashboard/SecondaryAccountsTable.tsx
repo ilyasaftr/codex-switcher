@@ -1,4 +1,6 @@
+import { useRef } from "react";
 import { ArrowRightLeft, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import type { AccountWithUsage } from "@/types";
 import type { AccountGroup } from "@/lib/account-groups";
@@ -21,7 +23,7 @@ interface SecondaryAccountsTableProps {
   switchingId: string | null;
   hasRunningProcesses: boolean;
   maskedAccountIds: Set<string>;
-  onSwitch: (accountId: string) => void;
+  onSwitch: (accountId: string, force: boolean) => void;
   onDelete: (account: AccountWithUsage) => void;
   embedded?: boolean;
   className?: string;
@@ -84,6 +86,32 @@ export function SecondaryAccountsTable({
   embedded = false,
   className,
 }: SecondaryAccountsTableProps) {
+  const lastSwitchClickByAccountRef = useRef<Record<string, number>>({});
+  const forceSwitchDoubleClickWindowMs = 500;
+  const forceSwitchHintToastId = "force-switch-hint";
+
+  const handleSwitchClick = (accountId: string) => {
+    if (!hasRunningProcesses) {
+      onSwitch(accountId, false);
+      return;
+    }
+
+    const now = Date.now();
+    const previous = lastSwitchClickByAccountRef.current[accountId] ?? 0;
+    lastSwitchClickByAccountRef.current[accountId] = now;
+
+    if (now - previous <= forceSwitchDoubleClickWindowMs) {
+      lastSwitchClickByAccountRef.current[accountId] = 0;
+      onSwitch(accountId, true);
+      return;
+    }
+
+    toast("Codex is running. Double click to force switch.", {
+      id: forceSwitchHintToastId,
+      duration: 1600,
+    });
+  };
+
   const content = (
     <div className={cn("overflow-hidden rounded-xl border border-border/70 bg-background/55", className)}>
       <div className="max-h-[min(60vh,760px)] overflow-y-auto overflow-x-hidden">
@@ -171,14 +199,16 @@ export function SecondaryAccountsTable({
                             type="button"
                             variant="ghost"
                             size="icon"
-                            className="size-8 rounded-lg border border-transparent bg-background/70 text-muted-foreground shadow-none transition-colors hover:border-border hover:bg-accent/70 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-0"
-                            disabled={isSwitching || hasRunningProcesses}
+                            className={cn(
+                              "size-8 rounded-lg border border-transparent bg-background/70 text-muted-foreground shadow-none transition-colors hover:border-border hover:bg-accent/70 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-0"
+                            )}
+                            disabled={isSwitching}
                             title={
                               hasRunningProcesses
-                                ? "Close all Codex processes first"
+                                ? "Codex is running. Click once for confirmation, then double click to force switch."
                                 : `Switch to ${getAccountVariantLabel(account)}`
                             }
-                            onClick={() => onSwitch(account.id)}
+                            onClick={() => handleSwitchClick(account.id)}
                           >
                             <ArrowRightLeft />
                           </Button>

@@ -136,6 +136,7 @@ function App() {
     refreshAllAccounts,
     warmupAllAccounts,
     switchAccount,
+    forceSwitchAccount,
     deleteAccount,
     importFromFile,
     exportAccountsSlimText,
@@ -225,20 +226,31 @@ function App() {
     }
   }, [themeMode]);
 
-  const handleSwitch = async (accountId: string) => {
-    const info = await checkProcesses();
-    if (info && !info.can_switch) {
-      toast.error("Close running Codex processes before switching accounts.");
-      return;
-    }
-
+  const handleSwitch = async (accountId: string, force: boolean) => {
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
-      toast.success("Active account switched.");
+      if (force) {
+        const result = await forceSwitchAccount(accountId);
+        if (result.relaunched) {
+          toast.success("Account switched and Codex restarted.");
+        } else {
+          toast.error(
+            `Account switched, but failed to reopen Codex${
+              result.relaunch_error ? `: ${result.relaunch_error}` : "."
+            }`
+          );
+        }
+      } else {
+        const info = await checkProcesses();
+        if (info && !info.can_switch) {
+          return;
+        }
+        await switchAccount(accountId);
+        toast.success("Active account switched.");
+      }
     } catch (err) {
       console.error("Failed to switch account:", err);
-      toast.error(`Switch failed: ${formatError(err)}`);
+      toast.error(`${force ? "Force switch" : "Switch"} failed: ${formatError(err)}`);
     } finally {
       setSwitchingId(null);
     }
@@ -582,7 +594,7 @@ function App() {
                   switchingId={switchingId}
                   hasRunningProcesses={hasRunningProcesses}
                   maskedAccountIds={maskedAccounts}
-                  onSwitch={(accountId) => void handleSwitch(accountId)}
+                  onSwitch={(accountId, force) => void handleSwitch(accountId, force)}
                   onDelete={setDeleteTarget}
                 />
               ) : null}

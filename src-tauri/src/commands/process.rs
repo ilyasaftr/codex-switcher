@@ -3,6 +3,9 @@
 use std::process::Command;
 
 #[cfg(windows)]
+use anyhow::Context;
+
+#[cfg(windows)]
 use std::collections::HashSet;
 
 #[cfg(windows)]
@@ -24,6 +27,15 @@ struct WindowsCodexProcess {
     main_window_title: String,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnixCodexProcess {
+    pid: u32,
+    parent_pid: u32,
+    command: String,
+    executable: String,
+}
+
 /// Information about running Codex processes
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CodexProcessInfo {
@@ -40,7 +52,7 @@ pub struct CodexProcessInfo {
 /// Check for running Codex processes
 #[tauri::command]
 pub async fn check_codex_processes() -> Result<CodexProcessInfo, String> {
-    let (pids, bg_count) = find_codex_processes().map_err(|e| e.to_string())?;
+    let (pids, bg_count) = detect_codex_processes().map_err(|e| e.to_string())?;
     let count = pids.len();
 
     Ok(CodexProcessInfo {
@@ -51,64 +63,89 @@ pub async fn check_codex_processes() -> Result<CodexProcessInfo, String> {
     })
 }
 
+pub(crate) fn find_active_codex_processes() -> anyhow::Result<Vec<u32>> {
+    let (pids, _) = detect_codex_processes()?;
+    Ok(pids)
+}
+
+pub(crate) fn kill_codex_processes(pids: &[u32]) -> anyhow::Result<()> {
+    for pid in pids {
+        #[cfg(unix)]
+        {
+            let output = Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to kill Codex process {pid}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+        #[cfg(windows)]
+        {
+            let output = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to kill Codex process {pid}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn terminate_codex_processes(pids: &[u32]) -> anyhow::Result<()> {
+    for pid in pids {
+        #[cfg(unix)]
+        {
+            let output = Command::new("kill")
+                .arg("-15")
+                .arg(pid.to_string())
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to terminate Codex process {pid}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = pid;
+        }
+    }
+
+    Ok(())
+}
+
 /// Find all running codex processes. Returns (active_pids, background_count)
-fn find_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
+fn detect_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
     #[cfg(unix)]
     {
-        let mut pids = Vec::new();
-        let mut bg_count = 0;
-
-        // Use ps with custom format to get the pid and full command line
-        let output = Command::new("ps").args(["-eo", "pid,command"]).output();
+        // Include parent PID so helper subprocesses can be filtered without
+        // counting them as separate active app instances.
+        let output = Command::new("ps").args(["-eo", "pid,ppid,command"]).output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines().skip(1) {
-                // Skip header
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                // The first part is PID, the rest is the command string
-                if let Some((pid_str, command)) = line.split_once(' ') {
-                    let command = command.trim();
-
-                    // Get the executable path/name (first word of the command string before args)
-                    let executable = command.split_whitespace().next().unwrap_or("");
-
-                    // Check if the executable is exactly "codex" or ends with "/codex"
-                    let is_codex = executable == "codex" || executable.ends_with("/codex");
-
-                    // Exclude if it's running from an extension or IDE integration (like Antigravity)
-                    // These are expected background processes we shouldn't block on
-                    let is_ide_plugin = is_ide_plugin_process(command);
-
-                    // Skip our own app
-                    let is_switcher =
-                        command.contains("codex-switcher") || command.contains("Codex Switcher");
-
-                    if is_codex && !is_switcher {
-                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                            if pid != std::process::id() && !pids.contains(&pid) {
-                                if is_ide_plugin {
-                                    bg_count += 1;
-                                } else {
-                                    pids.push(pid);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            return Ok(detect_unix_codex_processes_from_ps(
+                &stdout,
+                std::process::id(),
+            ));
         }
 
-        return Ok((pids, bg_count));
+        return Ok((Vec::new(), 0));
     }
 
     #[cfg(windows)]
     {
-        return find_windows_codex_processes();
+        return detect_windows_codex_processes();
     }
 
     #[allow(unreachable_code)]
@@ -116,7 +153,7 @@ fn find_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
 }
 
 #[cfg(windows)]
-fn find_windows_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
+fn detect_windows_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
     // tasklist counts every Electron helper (`--type=gpu-process`, crashpad, renderer, etc.),
     // which inflates the badge and incorrectly blocks switching. Use PowerShell so we can inspect
     // the command line and only count live top-level app instances.
@@ -228,9 +265,10 @@ fn is_windows_codex_root_process(process: &WindowsCodexProcess) -> bool {
 
 #[cfg(any(unix, windows))]
 fn is_ide_plugin_process(command: &str) -> bool {
-    command.contains(".antigravity")
-        || command.contains("openai.chatgpt")
-        || command.contains(".vscode")
+    let lower = command.to_ascii_lowercase();
+    lower.contains(".antigravity")
+        || lower.contains("openai.chatgpt")
+        || lower.contains(".vscode")
 }
 
 #[cfg(windows)]
@@ -263,4 +301,144 @@ where
     }
 
     false
+}
+
+#[cfg(unix)]
+fn detect_unix_codex_processes_from_ps(stdout: &str, self_pid: u32) -> (Vec<u32>, usize) {
+    let mut active_pids = Vec::new();
+    let mut ignored_count = 0;
+
+    for process in parse_unix_codex_processes(stdout) {
+        if process.pid == self_pid || is_switcher_command(&process.command) {
+            continue;
+        }
+
+        let executable_lower = process.executable.to_ascii_lowercase();
+        if !is_unix_codex_binary(&executable_lower) {
+            continue;
+        }
+
+        if is_ide_plugin_process(&process.command) || is_unix_codex_helper_process(&process.command)
+        {
+            ignored_count += 1;
+            continue;
+        }
+
+        active_pids.push(process.pid);
+    }
+
+    active_pids.sort_unstable();
+    active_pids.dedup();
+
+    (active_pids, ignored_count)
+}
+
+#[cfg(unix)]
+fn parse_unix_codex_processes(stdout: &str) -> Vec<UnixCodexProcess> {
+    stdout
+        .lines()
+        .skip(1)
+        .filter_map(parse_unix_codex_process_line)
+        .collect()
+}
+
+#[cfg(unix)]
+fn parse_unix_codex_process_line(line: &str) -> Option<UnixCodexProcess> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let parent_pid = parts.next()?.parse::<u32>().ok()?;
+    let command = parts.collect::<Vec<_>>().join(" ");
+    if command.is_empty() {
+        return None;
+    }
+
+    let executable = command.split_whitespace().next()?.to_string();
+
+    Some(UnixCodexProcess {
+        pid,
+        parent_pid,
+        command,
+        executable,
+    })
+}
+
+#[cfg(unix)]
+fn is_unix_codex_binary(executable_lower: &str) -> bool {
+    executable_lower == "codex" || executable_lower.ends_with("/codex")
+}
+
+#[cfg(unix)]
+fn is_unix_codex_helper_process(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+
+    lower.contains("/contents/resources/codex")
+        || lower.contains(" app-server")
+        || lower.contains("--type=")
+        || lower.contains("crashpad")
+}
+
+fn is_switcher_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("codex-switcher") || lower.contains("codex switcher")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_counts_one_top_level_app_even_with_helper_children() {
+        let stdout = "\
+  PID  PPID COMMAND
+  101     1 /Applications/Codex.app/Contents/MacOS/Codex
+  102   101 /Applications/Codex.app/Contents/Resources/codex app-server
+  103   101 /Applications/Codex.app/Contents/Resources/codex --type=utility
+  104   101 /Applications/Codex.app/Contents/Resources/codex crashpad-handler
+";
+
+        let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
+
+        assert_eq!(pids, vec![101]);
+        assert_eq!(ignored_count, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_ignores_plugin_and_switcher_processes() {
+        let stdout = "\
+  PID  PPID COMMAND
+  201     1 /Applications/Codex.app/Contents/MacOS/Codex
+  202     1 /Users/test/.vscode/extensions/openai.chatgpt/bin/codex app-server
+  203     1 /Applications/Codex Switcher.app/Contents/MacOS/codex-switcher
+";
+
+        let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
+
+        assert_eq!(pids, vec![201]);
+        assert_eq!(ignored_count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_counts_multiple_real_root_sessions_once_each() {
+        let stdout = "\
+  PID  PPID COMMAND
+  301     1 /Applications/Codex.app/Contents/MacOS/Codex
+  302   301 /Applications/Codex.app/Contents/Resources/codex app-server
+  401     1 codex
+  402   401 /usr/local/lib/codex/resources/codex app-server
+  501     1 /usr/bin/brew upgrade codex
+";
+
+        let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
+
+        assert_eq!(pids, vec![301, 401]);
+        assert_eq!(ignored_count, 2);
+    }
 }

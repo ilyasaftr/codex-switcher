@@ -82,3 +82,9 @@ export interface AccountRefreshResult {
 export interface WarmupAccountResult {
   auto_removed: AutoRemovedAccount | null;
 }
+
+export interface ForceSwitchResult {
+  switched: boolean;
+  relaunched: boolean;
+  relaunch_error: string | null;
+}

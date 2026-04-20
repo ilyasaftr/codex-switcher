@@ -298,6 +298,13 @@ pub struct WarmupAccountResult {
     pub auto_removed: Option<AutoRemovedAccount>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForceSwitchResult {
+    pub switched: bool,
+    pub relaunched: bool,
+    pub relaunch_error: Option<String>,
+}
+
 /// Warm-up execution summary across accounts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WarmupSummary {

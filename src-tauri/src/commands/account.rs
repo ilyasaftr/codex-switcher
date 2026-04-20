@@ -6,9 +6,12 @@ use crate::auth::{
     import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
     save_accounts, set_active_account, switch_to_account, touch_account,
 };
+use crate::commands::process::{
+    find_active_codex_processes, kill_codex_processes, terminate_codex_processes,
+};
 use crate::types::{
-    AccountInfo, AccountRefreshResult, AccountsStore, AuthData, ImportAccountsSummary,
-    StoredAccount,
+    AccountInfo, AccountRefreshResult, AccountsStore, AuthData, ForceSwitchResult,
+    ImportAccountsSummary, StoredAccount,
 };
 
 use anyhow::Context;
@@ -47,6 +50,10 @@ const FULL_PRESET_PASSPHRASE: &str = "gT7kQ9mV2xN4pL8sR1dH6zW3cB5yF0uJ_aE7nK2tP9
 const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const SLIM_IMPORT_CONCURRENCY: usize = 6;
+const FORCE_SWITCH_SHUTDOWN_WAIT_MS: u64 = 10000;
+const FORCE_SWITCH_SHUTDOWN_POLL_MS: u64 = 100;
+const FORCE_SWITCH_RELAUNCH_WAIT_MS: u64 = 10000;
+const FORCE_SWITCH_RELAUNCH_POLL_MS: u64 = 150;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SlimPayload {
@@ -151,6 +158,53 @@ pub async fn add_account_from_auth_json_text(contents: String) -> Result<Account
 /// Switch to a different account
 #[tauri::command]
 pub async fn switch_account(account_id: String) -> Result<(), String> {
+    switch_account_internal(&account_id)
+}
+
+/// Force switch: kill running Codex app processes, switch account, then relaunch Codex on macOS.
+#[tauri::command]
+pub async fn force_switch_account(account_id: String) -> Result<ForceSwitchResult, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = account_id;
+        return Err("Forced switch is supported on macOS only".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let active_pids = find_active_codex_processes().map_err(|e| e.to_string())?;
+        if !active_pids.is_empty() {
+            terminate_codex_processes(&active_pids).map_err(|e| e.to_string())?;
+            if !wait_for_codex_processes_to_exit() {
+                let remaining = find_active_codex_processes().map_err(|e| e.to_string())?;
+                if !remaining.is_empty() {
+                    kill_codex_processes(&remaining).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
+        if !wait_for_codex_processes_to_exit() {
+            return Err("Failed to fully stop Codex before relaunch".to_string());
+        }
+
+        switch_account_internal(&account_id)?;
+
+        match relaunch_codex_app() {
+            Ok(()) => Ok(ForceSwitchResult {
+                switched: true,
+                relaunched: true,
+                relaunch_error: None,
+            }),
+            Err(err) => Ok(ForceSwitchResult {
+                switched: true,
+                relaunched: false,
+                relaunch_error: Some(err.to_string()),
+            }),
+        }
+    }
+}
+
+fn switch_account_internal(account_id: &str) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
 
     // Find the account
@@ -164,10 +218,10 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
     switch_to_account(account).map_err(|e| e.to_string())?;
 
     // Update the active account in our store
-    set_active_account(&account_id).map_err(|e| e.to_string())?;
+    set_active_account(account_id).map_err(|e| e.to_string())?;
 
     // Update last_used_at
-    touch_account(&account_id).map_err(|e| e.to_string())?;
+    touch_account(account_id).map_err(|e| e.to_string())?;
 
     // Restart Antigravity background process if it is running
     // This allows it to pick up the new authorization file seamlessly
@@ -190,6 +244,74 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_codex_processes_to_exit() -> bool {
+    let max_ticks = FORCE_SWITCH_SHUTDOWN_WAIT_MS / FORCE_SWITCH_SHUTDOWN_POLL_MS;
+    for _ in 0..max_ticks {
+        match find_active_codex_processes() {
+            Ok(pids) if pids.is_empty() => return true,
+            Ok(_) | Err(_) => std::thread::sleep(std::time::Duration::from_millis(
+                FORCE_SWITCH_SHUTDOWN_POLL_MS,
+            )),
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_codex_processes_to_start() -> bool {
+    let max_ticks = FORCE_SWITCH_RELAUNCH_WAIT_MS / FORCE_SWITCH_RELAUNCH_POLL_MS;
+    for _ in 0..max_ticks {
+        match find_active_codex_processes() {
+            Ok(pids) if !pids.is_empty() => return true,
+            Ok(_) | Err(_) => std::thread::sleep(std::time::Duration::from_millis(
+                FORCE_SWITCH_RELAUNCH_POLL_MS,
+            )),
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn relaunch_codex_app() -> anyhow::Result<()> {
+    let launch_attempts: [&[&str]; 3] = [
+        &["-n", "-a", "Codex"],
+        &["-n", "/Applications/Codex.app"],
+        &["-na", "Codex"],
+    ];
+
+    let mut errors = Vec::new();
+    for args in launch_attempts {
+        let output = std::process::Command::new("open")
+            .args(args)
+            .output()
+            .context("Failed to execute open command for Codex relaunch")?;
+        if !output.status.success() {
+            errors.push(format!(
+                "open {} failed: {}{}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim(),
+                String::from_utf8_lossy(&output.stdout).trim()
+            ));
+            continue;
+        }
+
+        if wait_for_codex_processes_to_start() {
+            return Ok(());
+        }
+
+        errors.push(format!(
+            "open {} returned success but Codex did not start within {}ms",
+            args.join(" "),
+            FORCE_SWITCH_RELAUNCH_WAIT_MS
+        ));
+    }
+
+    anyhow::bail!(errors.join(" | "))
 }
 
 /// Remove an account

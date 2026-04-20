@@ -5,14 +5,12 @@ use chrono::Utc;
 use futures::{stream, StreamExt};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT},
-    StatusCode,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{
-    ensure_chatgpt_tokens_fresh, get_account, refresh_chatgpt_tokens, remove_account,
-    update_account_team_metadata,
+    ensure_chatgpt_tokens_fresh, get_account, remove_account, update_account_team_metadata,
 };
 use crate::types::{
     AccountRefreshResult, AutoRemovedAccount, AutoRemovedAccountReason, AuthData,
