@@ -31,9 +31,8 @@ struct WindowsCodexProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnixCodexProcess {
     pid: u32,
-    parent_pid: u32,
+    tty: String,
     command: String,
-    executable: String,
 }
 
 /// Information about running Codex processes
@@ -128,9 +127,11 @@ pub(crate) fn terminate_codex_processes(pids: &[u32]) -> anyhow::Result<()> {
 fn detect_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
     #[cfg(unix)]
     {
-        // Include parent PID so helper subprocesses can be filtered without
-        // counting them as separate active app instances.
-        let output = Command::new("ps").args(["-eo", "pid,ppid,command"]).output();
+        // Include TTY so interactive CLI sessions can be distinguished from
+        // background helper processes and orphaned headless codex instances.
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,tty=,command="])
+            .output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -313,18 +314,39 @@ fn detect_unix_codex_processes_from_ps(stdout: &str, self_pid: u32) -> (Vec<u32>
             continue;
         }
 
-        let executable_lower = process.executable.to_ascii_lowercase();
-        if !is_unix_codex_binary(&executable_lower) {
+        if process.command.contains("Codex Helper") || process.command.contains("CodexBar") {
             continue;
         }
 
-        if is_ide_plugin_process(&process.command) || is_unix_codex_helper_process(&process.command)
+        let first_token = process.command.split_whitespace().next().unwrap_or("");
+        let first_token_lower = first_token.to_ascii_lowercase();
+        let command_lower = process.command.to_ascii_lowercase();
+
+        let is_codex_cli = is_unix_codex_binary(&first_token_lower);
+        let is_codex_desktop = process.command.contains(".app/Contents/MacOS/Codex")
+            && !process.command.contains("Codex Helper")
+            && !process.command.contains("CodexBar");
+
+        if !is_codex_cli && !is_codex_desktop {
+            continue;
+        }
+
+        let is_app_server = command_lower.contains("codex app-server");
+        let has_tty = process.tty != "??" && process.tty != "?";
+
+        if is_ide_plugin_process(&command_lower)
+            || is_app_server
+            || is_unix_codex_helper_process(&command_lower)
         {
             ignored_count += 1;
             continue;
         }
 
-        active_pids.push(process.pid);
+        if is_codex_desktop || has_tty {
+            active_pids.push(process.pid);
+        } else {
+            ignored_count += 1;
+        }
     }
 
     active_pids.sort_unstable();
@@ -335,11 +357,7 @@ fn detect_unix_codex_processes_from_ps(stdout: &str, self_pid: u32) -> (Vec<u32>
 
 #[cfg(unix)]
 fn parse_unix_codex_processes(stdout: &str) -> Vec<UnixCodexProcess> {
-    stdout
-        .lines()
-        .skip(1)
-        .filter_map(parse_unix_codex_process_line)
-        .collect()
+    stdout.lines().filter_map(parse_unix_codex_process_line).collect()
 }
 
 #[cfg(unix)]
@@ -351,19 +369,16 @@ fn parse_unix_codex_process_line(line: &str) -> Option<UnixCodexProcess> {
 
     let mut parts = trimmed.split_whitespace();
     let pid = parts.next()?.parse::<u32>().ok()?;
-    let parent_pid = parts.next()?.parse::<u32>().ok()?;
+    let tty = parts.next()?.to_string();
     let command = parts.collect::<Vec<_>>().join(" ");
     if command.is_empty() {
         return None;
     }
 
-    let executable = command.split_whitespace().next()?.to_string();
-
     Some(UnixCodexProcess {
         pid,
-        parent_pid,
+        tty,
         command,
-        executable,
     })
 }
 
@@ -374,12 +389,9 @@ fn is_unix_codex_binary(executable_lower: &str) -> bool {
 
 #[cfg(unix)]
 fn is_unix_codex_helper_process(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-
-    lower.contains("/contents/resources/codex")
-        || lower.contains(" app-server")
-        || lower.contains("--type=")
-        || lower.contains("crashpad")
+    command.contains("/contents/resources/codex")
+        || command.contains("--type=")
+        || command.contains("crashpad")
 }
 
 fn is_switcher_command(command: &str) -> bool {
@@ -395,11 +407,10 @@ mod tests {
     #[test]
     fn unix_counts_one_top_level_app_even_with_helper_children() {
         let stdout = "\
-  PID  PPID COMMAND
-  101     1 /Applications/Codex.app/Contents/MacOS/Codex
-  102   101 /Applications/Codex.app/Contents/Resources/codex app-server
-  103   101 /Applications/Codex.app/Contents/Resources/codex --type=utility
-  104   101 /Applications/Codex.app/Contents/Resources/codex crashpad-handler
+  101 ttys001 /Applications/Codex.app/Contents/MacOS/Codex
+  102 ?? /Applications/Codex.app/Contents/Resources/codex app-server
+  103 ?? /Applications/Codex.app/Contents/Resources/codex --type=utility
+  104 ?? /Applications/Codex.app/Contents/Resources/codex crashpad-handler
 ";
 
         let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
@@ -412,10 +423,9 @@ mod tests {
     #[test]
     fn unix_ignores_plugin_and_switcher_processes() {
         let stdout = "\
-  PID  PPID COMMAND
-  201     1 /Applications/Codex.app/Contents/MacOS/Codex
-  202     1 /Users/test/.vscode/extensions/openai.chatgpt/bin/codex app-server
-  203     1 /Applications/Codex Switcher.app/Contents/MacOS/codex-switcher
+  201 ttys001 /Applications/Codex.app/Contents/MacOS/Codex
+  202 ?? /Users/test/.vscode/extensions/openai.chatgpt/bin/codex app-server
+  203 ?? /Applications/Codex Switcher.app/Contents/MacOS/codex-switcher
 ";
 
         let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
@@ -428,17 +438,31 @@ mod tests {
     #[test]
     fn unix_counts_multiple_real_root_sessions_once_each() {
         let stdout = "\
-  PID  PPID COMMAND
-  301     1 /Applications/Codex.app/Contents/MacOS/Codex
-  302   301 /Applications/Codex.app/Contents/Resources/codex app-server
-  401     1 codex
-  402   401 /usr/local/lib/codex/resources/codex app-server
-  501     1 /usr/bin/brew upgrade codex
+  301 ?? /Applications/Codex.app/Contents/MacOS/Codex
+  302 ?? /Applications/Codex.app/Contents/Resources/codex app-server
+  401 ttys003 codex
+  402 ?? /usr/local/lib/codex/resources/codex app-server
+  501 ?? codex
 ";
 
         let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
 
         assert_eq!(pids, vec![301, 401]);
-        assert_eq!(ignored_count, 2);
+        assert_eq!(ignored_count, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_ignores_codex_helper_and_codex_bar_bundle_processes() {
+        let stdout = "\
+  601 ?? /Applications/Codex Helper.app/Contents/MacOS/Codex Helper --type=renderer
+  602 ?? /Applications/CodexBar.app/Contents/MacOS/CodexBar
+  603 ?? /Applications/Codex.app/Contents/MacOS/Codex
+";
+
+        let (pids, ignored_count) = detect_unix_codex_processes_from_ps(stdout, 999_999);
+
+        assert_eq!(pids, vec![603]);
+        assert_eq!(ignored_count, 0);
     }
 }
