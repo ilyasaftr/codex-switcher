@@ -15,7 +15,9 @@ export type SecondaryAccountsSort =
   | "reset_asc"
   | "reset_desc"
   | "remaining_desc"
-  | "remaining_asc";
+  | "remaining_asc"
+  | "subscription_asc"
+  | "subscription_desc";
 
 interface SecondaryAccountsTableProps {
   groups: AccountGroup[];
@@ -67,6 +69,41 @@ function formatUsage(account: AccountWithUsage) {
     weeklyUsedPercent: account.usage.secondary_used_percent,
     primaryReset: formatResetLine("Primary", account.usage.primary_resets_at),
     weeklyReset: formatResetLine("Weekly", account.usage.secondary_resets_at),
+  };
+}
+
+function formatSubscriptionExpiry(expiresAt: string | null | undefined) {
+  if (!expiresAt) {
+    return {
+      label: "Unavailable",
+      className: "text-muted-foreground/80",
+    };
+  }
+
+  const expiryDate = new Date(expiresAt);
+  if (Number.isNaN(expiryDate.getTime())) {
+    return {
+      label: "Unavailable",
+      className: "text-muted-foreground/80",
+    };
+  }
+
+  const formattedDate = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(expiryDate);
+
+  if (expiryDate.getTime() <= Date.now()) {
+    return {
+      label: `Expired ${formattedDate}`,
+      className: "text-destructive",
+    };
+  }
+
+  return {
+    label: `Expires ${formattedDate}`,
+    className: "text-muted-foreground",
   };
 }
 
@@ -132,8 +169,16 @@ export function SecondaryAccountsTable({
                 className="overflow-hidden rounded-[20px] border border-border/70 bg-card/85 shadow-[var(--shadow-soft)]"
               >
                 <div className="border-b border-border/70 px-4 py-2.5">
-                  <div className="truncate text-sm font-semibold tracking-[-0.01em] text-foreground">
-                    {maskValue(group.identity, identityMasked)}
+                  <div className="flex items-center justify-between gap-3">
+                    <div
+                      className="min-w-0 break-all text-sm font-semibold tracking-[-0.01em] text-foreground"
+                      title={identityMasked ? undefined : group.identity}
+                    >
+                      {maskValue(group.identity, identityMasked)}
+                    </div>
+                    <div className="shrink-0 rounded-full border border-border/70 bg-background/75 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                      {visibleAccounts.length} {visibleAccounts.length === 1 ? "account" : "accounts"}
+                    </div>
                   </div>
                 </div>
 
@@ -142,18 +187,30 @@ export function SecondaryAccountsTable({
                     const isMasked = maskedAccountIds.has(account.id);
                     const isSwitching = switchingId === account.id;
                     const usage = formatUsage(account);
+                    const subscription = formatSubscriptionExpiry(account.subscription_expires_at);
 
                     return (
                       <div
                         key={account.id}
-                        className="grid items-center gap-x-4 gap-y-2 px-4 py-2.5 md:grid-cols-[minmax(0,116px)_minmax(0,1fr)_72px]"
+                        className="grid items-center gap-x-4 gap-y-3 px-4 py-3 md:grid-cols-[minmax(0,156px)_minmax(0,1fr)_72px]"
                       >
-                        <div className="flex min-w-0 items-center justify-center">
+                        <div className="flex min-w-0 flex-col items-start gap-1.5 md:items-center">
                           <div className="inline-flex max-w-full items-center rounded-full border border-border/70 bg-background/80 px-3 py-1 text-xs font-medium text-foreground/90">
                             <span className="truncate">
-                              {maskValue(getAccountVariantLabel(account), isMasked)}
+                              {isMasked ? "Hidden account" : getAccountVariantLabel(account)}
                             </span>
                           </div>
+                          {account.auth_mode === "chat_g_p_t" ? (
+                            <div
+                              className={cn(
+                                "max-w-full truncate text-xs font-medium",
+                                subscription.className
+                              )}
+                              title={subscription.label}
+                            >
+                              {subscription.label}
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="min-w-0 space-y-2">

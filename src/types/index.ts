@@ -7,6 +7,7 @@ export interface AccountInfo {
   name: string;
   email: string | null;
   plan_type: string | null;
+  subscription_expires_at: string | null;
   team_name: string | null;
   team_info_updated_at: string | null;
   auth_mode: AuthMode;

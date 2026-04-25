@@ -1,26 +1,27 @@
 //! Usage API client for fetching rate limits and credits
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{stream, StreamExt};
-use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT},
-};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::auth::{
     ensure_chatgpt_tokens_fresh, get_account, remove_account, update_account_team_metadata,
 };
 use crate::types::{
-    AccountRefreshResult, AutoRemovedAccount, AutoRemovedAccountReason, AuthData,
+    AccountRefreshResult, AuthData, AutoRemovedAccount, AutoRemovedAccountReason,
     CreditStatusDetails, RateLimitDetails, RateLimitStatusPayload, RateLimitWindow, StoredAccount,
     UsageInfo, UsageQueryResult, WarmupAccountResult,
 };
 
 const CHATGPT_BACKEND_API: &str = "https://chatgpt.com/backend-api";
 const CHATGPT_CODEX_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/responses";
-const CHATGPT_ACCOUNT_CHECK_API: &str = "https://chatgpt.com/backend-api/wham/accounts/check";
+const CHATGPT_TEAM_ACCOUNT_CHECK_API: &str = "https://chatgpt.com/backend-api/wham/accounts/check";
+const CHATGPT_SUBSCRIPTION_ACCOUNT_CHECK_API: &str =
+    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 const OPENAI_API: &str = "https://api.openai.com/v1";
 const CODEX_USER_AGENT: &str = "codex-cli/1.0.0";
 
@@ -29,20 +30,47 @@ pub struct AccountMetadata {
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub team_name: Option<String>,
+    pub subscription_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AccountsCheckResponse {
-    accounts: Vec<AccountsCheckAccount>,
+struct TeamAccountsCheckResponse {
+    accounts: Vec<TeamAccountsCheckAccount>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AccountsCheckAccount {
+struct TeamAccountsCheckAccount {
     id: String,
     #[serde(default)]
     plan_type: Option<String>,
     #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscriptionAccountsCheckResponse {
+    #[serde(default)]
+    accounts: HashMap<String, SubscriptionAccountsCheckEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscriptionAccountsCheckEntry {
+    #[serde(default)]
+    account: Option<SubscriptionAccountsCheckAccount>,
+    #[serde(default)]
+    entitlement: Option<SubscriptionAccountsCheckEntitlement>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscriptionAccountsCheckAccount {
+    #[serde(default)]
+    plan_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscriptionAccountsCheckEntitlement {
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) enum ChatgptRequestOutcome<T> {
@@ -120,6 +148,7 @@ pub async fn refresh_account_metadata(account_id: &str) -> Result<AccountRefresh
                         metadata.email.clone(),
                         metadata.plan_type.clone(),
                         metadata.team_name.clone(),
+                        Some(metadata.subscription_expires_at),
                         Utc::now(),
                     )?;
                     Ok(AccountRefreshResult {
@@ -140,18 +169,22 @@ pub(crate) async fn fetch_account_metadata_for_account(
     account: &StoredAccount,
 ) -> Result<ChatgptRequestOutcome<AccountMetadata>> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
-    let response = send_chatgpt_accounts_check_request(access_token, chatgpt_account_id).await?;
+    let team_response =
+        send_chatgpt_team_accounts_check_request(access_token, chatgpt_account_id).await?;
+    let subscription_response =
+        send_chatgpt_subscription_accounts_check_request(access_token, chatgpt_account_id).await?;
 
-    fetch_account_metadata_from_response(account, response).await
+    fetch_account_metadata_from_response(account, team_response, subscription_response).await
 }
 
 async fn fetch_account_metadata_from_response(
     account: &StoredAccount,
-    response: reqwest::Response,
+    team_response: reqwest::Response,
+    subscription_response: reqwest::Response,
 ) -> Result<ChatgptRequestOutcome<AccountMetadata>> {
-    let status = response.status();
+    let status = team_response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = team_response.text().await.unwrap_or_default();
         println!("[Metadata] Error response: {body}");
         if let Some(reason) = detect_invalid_chatgpt_account_reason(&body) {
             return Ok(ChatgptRequestOutcome::AutoRemoved(
@@ -161,12 +194,31 @@ async fn fetch_account_metadata_from_response(
         anyhow::bail!("Account metadata request failed with status {status}");
     }
 
-    let body = response
+    let body = team_response
         .text()
         .await
         .context("Failed to read account metadata response body")?;
-    let payload: AccountsCheckResponse =
-        serde_json::from_str(&body).context("Failed to parse account metadata response")?;
+    let team_payload: TeamAccountsCheckResponse =
+        serde_json::from_str(&body).context("Failed to parse team account metadata response")?;
+
+    let status = subscription_response.status();
+    if !status.is_success() {
+        let body = subscription_response.text().await.unwrap_or_default();
+        println!("[Metadata] Subscription error response: {body}");
+        if let Some(reason) = detect_invalid_chatgpt_account_reason(&body) {
+            return Ok(ChatgptRequestOutcome::AutoRemoved(
+                auto_remove_invalid_account(account, reason)?,
+            ));
+        }
+        anyhow::bail!("Subscription metadata request failed with status {status}");
+    }
+
+    let body = subscription_response
+        .text()
+        .await
+        .context("Failed to read subscription metadata response body")?;
+    let subscription_payload: SubscriptionAccountsCheckResponse = serde_json::from_str(&body)
+        .context("Failed to parse subscription account metadata response")?;
 
     let account_id = match &account.auth_data {
         AuthData::ChatGPT { account_id, .. } => account_id.as_deref(),
@@ -176,8 +228,10 @@ async fn fetch_account_metadata_from_response(
     Ok(ChatgptRequestOutcome::Success(build_account_metadata(
         account.email.clone(),
         account.plan_type.clone(),
+        account.subscription_expires_at,
         account_id,
-        payload,
+        team_payload,
+        subscription_payload,
     )))
 }
 
@@ -191,7 +245,13 @@ async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageQue
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
     let response = send_chatgpt_usage_request(access_token, chatgpt_account_id).await?;
-    parse_usage_response(&fresh_account.id, &fresh_account.name, &fresh_account, response).await
+    parse_usage_response(
+        &fresh_account.id,
+        &fresh_account.name,
+        &fresh_account,
+        response,
+    )
+    .await
 }
 
 async fn parse_usage_response(
@@ -398,7 +458,7 @@ async fn send_chatgpt_usage_request(
         .context("Failed to send usage request")
 }
 
-async fn send_chatgpt_accounts_check_request(
+async fn send_chatgpt_team_accounts_check_request(
     access_token: &str,
     chatgpt_account_id: Option<&str>,
 ) -> Result<reqwest::Response> {
@@ -406,11 +466,26 @@ async fn send_chatgpt_accounts_check_request(
     let headers = build_chatgpt_headers(access_token, chatgpt_account_id)?;
 
     client
-        .get(CHATGPT_ACCOUNT_CHECK_API)
+        .get(CHATGPT_TEAM_ACCOUNT_CHECK_API)
         .headers(headers)
         .send()
         .await
-        .context("Failed to send account metadata request")
+        .context("Failed to send team account metadata request")
+}
+
+async fn send_chatgpt_subscription_accounts_check_request(
+    access_token: &str,
+    chatgpt_account_id: Option<&str>,
+) -> Result<reqwest::Response> {
+    let client = reqwest::Client::new();
+    let headers = build_chatgpt_headers(access_token, chatgpt_account_id)?;
+
+    client
+        .get(CHATGPT_SUBSCRIPTION_ACCOUNT_CHECK_API)
+        .headers(headers)
+        .send()
+        .await
+        .context("Failed to send subscription account metadata request")
 }
 
 async fn send_chatgpt_warmup_request(
@@ -558,25 +633,43 @@ fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusD
 fn build_account_metadata(
     email: Option<String>,
     fallback_plan_type: Option<String>,
+    fallback_subscription_expires_at: Option<DateTime<Utc>>,
     selected_account_id: Option<&str>,
-    payload: AccountsCheckResponse,
+    team_payload: TeamAccountsCheckResponse,
+    subscription_payload: SubscriptionAccountsCheckResponse,
 ) -> AccountMetadata {
-    let matched = selected_account_id
-        .and_then(|account_id| payload.accounts.iter().find(|entry| entry.id == account_id));
+    let matched_team = selected_account_id.and_then(|account_id| {
+        team_payload
+            .accounts
+            .iter()
+            .find(|entry| entry.id == account_id)
+    });
+    let matched_subscription = selected_account_id
+        .and_then(|account_id| subscription_payload.accounts.get(account_id))
+        .or_else(|| subscription_payload.accounts.get("default"))
+        .or_else(|| subscription_payload.accounts.values().next());
 
-    let plan_type = matched
-        .and_then(|entry| entry.plan_type.clone())
+    let plan_type = matched_subscription
+        .and_then(|entry| entry.account.as_ref())
+        .and_then(|account| account.plan_type.clone())
+        .or_else(|| matched_team.and_then(|entry| entry.plan_type.clone()))
         .or(fallback_plan_type);
 
-    let team_name = matched.and_then(|entry| match entry.plan_type.as_deref() {
+    let team_name = matched_team.and_then(|entry| match entry.plan_type.as_deref() {
         Some("team") => entry.name.clone(),
         _ => None,
     });
+
+    let subscription_expires_at = matched_subscription
+        .and_then(|entry| entry.entitlement.as_ref())
+        .and_then(|entitlement| entitlement.expires_at)
+        .or(fallback_subscription_expires_at);
 
     AccountMetadata {
         email,
         plan_type,
         team_name,
+        subscription_expires_at,
     }
 }
 
@@ -636,9 +729,7 @@ fn detect_invalid_chatgpt_account_reason_in_error(
     None
 }
 
-fn detect_invalid_chatgpt_account_reason_in_text(
-    text: &str,
-) -> Option<AutoRemovedAccountReason> {
+fn detect_invalid_chatgpt_account_reason_in_text(text: &str) -> Option<AutoRemovedAccountReason> {
     if let Some(reason) = detect_invalid_chatgpt_account_reason(text) {
         return Some(reason);
     }
@@ -676,13 +767,15 @@ fn auto_remove_invalid_account(
 mod tests {
     use super::{
         build_account_metadata, detect_invalid_chatgpt_account_reason,
-        detect_invalid_chatgpt_account_reason_in_text, AccountMetadata, AccountsCheckResponse,
+        detect_invalid_chatgpt_account_reason_in_text, AccountMetadata,
+        SubscriptionAccountsCheckResponse, TeamAccountsCheckResponse,
     };
     use crate::types::AutoRemovedAccountReason;
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn account_metadata_uses_matching_team_workspace_name() {
-        let payload: AccountsCheckResponse = serde_json::from_str(
+        let team_payload: TeamAccountsCheckResponse = serde_json::from_str(
             r#"{
                 "accounts": [
                     { "id": "team-1", "plan_type": "team", "name": "Lokawave" },
@@ -691,12 +784,25 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let subscription_payload: SubscriptionAccountsCheckResponse = serde_json::from_str(
+            r#"{
+                "accounts": {
+                    "team-1": {
+                        "account": { "plan_type": "team" },
+                        "entitlement": { "expires_at": "2026-04-23T05:03:38+00:00" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
 
         let metadata = build_account_metadata(
             Some("user@example.com".to_string()),
             Some("team".to_string()),
+            None,
             Some("team-1"),
-            payload,
+            team_payload,
+            subscription_payload,
         );
 
         assert_eq!(
@@ -705,13 +811,16 @@ mod tests {
                 email: Some("user@example.com".to_string()),
                 plan_type: Some("team".to_string()),
                 team_name: Some("Lokawave".to_string()),
+                subscription_expires_at: DateTime::parse_from_rfc3339("2026-04-23T05:03:38+00:00")
+                    .ok()
+                    .map(|value| value.with_timezone(&Utc)),
             }
         );
     }
 
     #[test]
     fn account_metadata_keeps_personal_accounts_without_team_name() {
-        let payload: AccountsCheckResponse = serde_json::from_str(
+        let team_payload: TeamAccountsCheckResponse = serde_json::from_str(
             r#"{
                 "accounts": [
                     { "id": "personal-1", "plan_type": "free", "name": null }
@@ -719,16 +828,62 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let subscription_payload: SubscriptionAccountsCheckResponse = serde_json::from_str(
+            r#"{
+                "accounts": {
+                    "personal-1": {
+                        "account": { "plan_type": "plus" },
+                        "entitlement": { "expires_at": "2026-05-01T00:00:00Z" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
 
         let metadata = build_account_metadata(
             Some("user@example.com".to_string()),
             Some("free".to_string()),
+            None,
             Some("personal-1"),
-            payload,
+            team_payload,
+            subscription_payload,
         );
 
         assert_eq!(metadata.team_name, None);
-        assert_eq!(metadata.plan_type.as_deref(), Some("free"));
+        assert_eq!(metadata.plan_type.as_deref(), Some("plus"));
+        assert_eq!(
+            metadata
+                .subscription_expires_at
+                .map(|value| value.to_rfc3339()),
+            Some("2026-05-01T00:00:00+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn account_metadata_uses_token_subscription_expiry_when_api_omits_it() {
+        let team_payload: TeamAccountsCheckResponse =
+            serde_json::from_str(r#"{ "accounts": [] }"#).unwrap();
+        let subscription_payload: SubscriptionAccountsCheckResponse =
+            serde_json::from_str(r#"{ "accounts": {} }"#).unwrap();
+        let fallback_expiry = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let metadata = build_account_metadata(
+            Some("user@example.com".to_string()),
+            Some("team".to_string()),
+            Some(fallback_expiry),
+            Some("missing-account"),
+            team_payload,
+            subscription_payload,
+        );
+
+        assert_eq!(
+            metadata
+                .subscription_expires_at
+                .map(|value| value.to_rfc3339()),
+            Some("2026-06-01T00:00:00+00:00".to_string())
+        );
     }
 
     #[test]

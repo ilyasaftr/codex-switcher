@@ -55,6 +55,13 @@ export function getAccountPrimaryResetAt(account: AccountWithUsage) {
   return account.usage?.primary_resets_at ?? Number.POSITIVE_INFINITY;
 }
 
+export function getAccountSubscriptionExpiresAt(account: AccountWithUsage) {
+  if (!account.subscription_expires_at) return null;
+
+  const timestamp = new Date(account.subscription_expires_at).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
 function compareAccountsForDefault(left: AccountWithUsage, right: AccountWithUsage) {
   if (left.is_active !== right.is_active) {
     return left.is_active ? -1 : 1;

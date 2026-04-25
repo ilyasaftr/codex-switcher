@@ -14,6 +14,7 @@ function account(overrides: Partial<AccountWithUsage>): AccountWithUsage {
     name: overrides.name ?? "fallback-name",
     email: overrides.email ?? null,
     plan_type: overrides.plan_type ?? "team",
+    subscription_expires_at: overrides.subscription_expires_at ?? null,
     team_name: overrides.team_name ?? null,
     team_info_updated_at: overrides.team_info_updated_at ?? null,
     auth_mode: overrides.auth_mode ?? "chat_g_p_t",

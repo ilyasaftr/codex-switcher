@@ -331,6 +331,7 @@ pub async fn rename_account(account_id: String, new_name: String) -> Result<(), 
         None,
         None,
         None,
+        None,
     )
     .map_err(|e| e.to_string())?;
     Ok(())

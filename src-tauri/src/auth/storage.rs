@@ -162,7 +162,7 @@ pub fn touch_account(account_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Update an account's metadata (name, email, plan_type)
+/// Update an account's metadata (name, email, plan_type, team, subscription)
 pub fn update_account_metadata(
     account_id: &str,
     name: Option<String>,
@@ -170,6 +170,7 @@ pub fn update_account_metadata(
     plan_type: Option<String>,
     team_name: Option<String>,
     team_info_updated_at: Option<DateTime<Utc>>,
+    subscription_expires_at: Option<Option<DateTime<Utc>>>,
 ) -> Result<()> {
     let mut store = load_accounts()?;
 
@@ -211,6 +212,10 @@ pub fn update_account_metadata(
         account.team_info_updated_at = team_info_updated_at;
     }
 
+    if let Some(subscription_expires_at) = subscription_expires_at {
+        account.subscription_expires_at = subscription_expires_at;
+    }
+
     save_accounts(&store)?;
     Ok(())
 }
@@ -224,6 +229,7 @@ pub fn update_account_chatgpt_tokens(
     chatgpt_account_id: Option<String>,
     email: Option<String>,
     plan_type: Option<String>,
+    subscription_expires_at: Option<DateTime<Utc>>,
 ) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
 
@@ -260,6 +266,10 @@ pub fn update_account_chatgpt_tokens(
         account.plan_type = Some(new_plan_type);
     }
 
+    if let Some(subscription_expires_at) = subscription_expires_at {
+        account.subscription_expires_at = Some(subscription_expires_at);
+    }
+
     let updated = account.clone();
     save_accounts(&store)?;
     Ok(updated)
@@ -271,6 +281,7 @@ pub fn update_account_team_metadata(
     email: Option<String>,
     plan_type: Option<String>,
     team_name: Option<String>,
+    subscription_expires_at: Option<Option<DateTime<Utc>>>,
     team_info_updated_at: DateTime<Utc>,
 ) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
@@ -291,6 +302,9 @@ pub fn update_account_team_metadata(
 
     account.team_name = team_name;
     account.team_info_updated_at = Some(team_info_updated_at);
+    if let Some(subscription_expires_at) = subscription_expires_at {
+        account.subscription_expires_at = subscription_expires_at;
+    }
 
     let updated = account.clone();
     save_accounts(&store)?;
@@ -311,7 +325,10 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn is_duplicate_chatgpt_account(existing_accounts: &[StoredAccount], candidate: &StoredAccount) -> bool {
+fn is_duplicate_chatgpt_account(
+    existing_accounts: &[StoredAccount],
+    candidate: &StoredAccount,
+) -> bool {
     let AuthData::ChatGPT {
         refresh_token: candidate_refresh_token,
         account_id: candidate_account_id,
@@ -351,7 +368,10 @@ fn is_duplicate_chatgpt_account(existing_accounts: &[StoredAccount], candidate: 
     })
 }
 
-fn generate_chatgpt_display_name(existing_accounts: &[StoredAccount], candidate: &StoredAccount) -> String {
+fn generate_chatgpt_display_name(
+    existing_accounts: &[StoredAccount],
+    candidate: &StoredAccount,
+) -> String {
     let base = candidate
         .email
         .as_deref()
@@ -428,12 +448,16 @@ fn remove_account_from_store(
     };
 
     if removed_was_active {
-        store.active_account_id = replacement_account.as_ref().map(|account| account.id.clone());
+        store.active_account_id = replacement_account
+            .as_ref()
+            .map(|account| account.id.clone());
     }
 
     let result = AccountRemovalResult {
         removed_was_active,
-        replacement_account_id: replacement_account.as_ref().map(|account| account.id.clone()),
+        replacement_account_id: replacement_account
+            .as_ref()
+            .map(|account| account.id.clone()),
     };
 
     Ok((result, replacement_account))
@@ -454,6 +478,7 @@ mod tests {
             name.to_string(),
             email.map(str::to_string),
             Some("team".to_string()),
+            None,
             format!("id-token-{refresh_token}"),
             format!("access-token-{refresh_token}"),
             refresh_token.to_string(),
@@ -637,8 +662,14 @@ mod tests {
         let (result, _) = remove_account_from_store(&mut store, &removed_id).unwrap();
 
         assert!(result.removed_was_active);
-        assert_eq!(result.replacement_account_id.as_deref(), Some(expected_next_id.as_str()));
-        assert_eq!(store.active_account_id.as_deref(), Some(expected_next_id.as_str()));
+        assert_eq!(
+            result.replacement_account_id.as_deref(),
+            Some(expected_next_id.as_str())
+        );
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(expected_next_id.as_str())
+        );
         assert_eq!(store.accounts.len(), 1);
     }
 }

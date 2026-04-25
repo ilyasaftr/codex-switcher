@@ -1,7 +1,8 @@
-import { ShieldCheck, Trash2, UserCheck } from "lucide-react";
+import { ShieldCheck, Trash2, UserCheck, UsersRound } from "lucide-react";
 
 import type { AccountWithUsage } from "@/types";
 import { formatPlanLabel } from "@/lib/account-groups";
+import { cn } from "@/lib/utils";
 import { PanelActionButton } from "@/components/dashboard/PanelActionButton";
 import { PanelShell } from "@/components/dashboard/PanelShell";
 import { UsageBar } from "@/components/UsageBar";
@@ -12,32 +13,88 @@ interface AccountCardProps {
   masked?: boolean;
 }
 
+interface SummaryRow {
+  label: string;
+  value: string;
+  valueClassName?: string;
+  variant?: "default" | "email" | "plan";
+}
+
 function maskValue(value: string, masked: boolean) {
   if (!masked) return value;
   return "•".repeat(Math.max(8, Math.min(value.length, 18)));
+}
+
+function getSubscriptionSummary(expiresAt: string | null | undefined): SummaryRow {
+  if (!expiresAt) {
+    return {
+      label: "Subscription",
+      value: "Unavailable",
+      valueClassName: "text-muted-foreground",
+    };
+  }
+
+  const expiryDate = new Date(expiresAt);
+  if (Number.isNaN(expiryDate.getTime())) {
+    return {
+      label: "Subscription",
+      value: "Unavailable",
+      valueClassName: "text-muted-foreground",
+    };
+  }
+
+  const formattedDate = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(expiryDate);
+
+  const expired = expiryDate.getTime() <= Date.now();
+
+  return {
+    label: "Subscription",
+    value: `${expired ? "Expired" : "Expires"} ${formattedDate}`,
+    valueClassName: expired
+      ? "text-destructive"
+      : "text-foreground/90",
+  };
 }
 
 function SummaryRail({
   rows,
   masked,
 }: {
-  rows: Array<{ label: string; value: string }>;
+  rows: SummaryRow[];
   masked: boolean;
 }) {
   return (
-    <div className="rounded-2xl border border-border/60 bg-muted/20 px-4 py-3">
-      <div className="grid gap-3 md:grid-cols-3">
-        {rows.map((row, index) => (
+    <div className="rounded-2xl border border-border/60 bg-muted/20 p-3.5">
+      <div className="grid gap-3 md:grid-cols-2">
+        {rows.map((row) => (
           <div
             key={row.label}
-            className={index > 0 ? "md:border-l md:border-border/60 md:pl-4" : undefined}
+            className="min-w-0 rounded-xl border border-border/55 bg-background/55 px-3 py-2.5"
           >
             <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
               {row.label}
             </div>
-            <div className="mt-1.5 break-all text-sm font-medium text-foreground/90">
-              {maskValue(row.value, masked)}
-            </div>
+            {row.variant === "plan" ? (
+              <div className="mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                <UsersRound className="size-3.5 shrink-0" />
+                <span className="truncate">{maskValue(row.value, masked)}</span>
+              </div>
+            ) : (
+              <div
+                className={cn(
+                  "mt-1.5 text-sm font-medium",
+                  row.variant === "email" ? "break-all" : "truncate",
+                  row.valueClassName ?? "text-foreground/90"
+                )}
+                title={masked ? undefined : row.value}
+              >
+                {maskValue(row.value, masked)}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -52,10 +109,13 @@ export function AccountCard({
 }: AccountCardProps) {
   const planDisplay = formatPlanLabel(account.plan_type, account.auth_mode);
   const metadataRows = [
-    { label: "Email", value: account.email ?? account.name },
-    { label: "Plan Type", value: planDisplay },
+    { label: "Email", value: account.email ?? account.name, variant: "email" as const },
+    { label: "Plan Type", value: planDisplay, variant: "plan" as const },
     ...(account.plan_type === "team" && account.team_name
       ? [{ label: "Team Name", value: account.team_name }]
+      : []),
+    ...(account.auth_mode === "chat_g_p_t"
+      ? [getSubscriptionSummary(account.subscription_expires_at)]
       : []),
   ];
 

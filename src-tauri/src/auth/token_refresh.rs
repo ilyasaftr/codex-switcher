@@ -7,7 +7,7 @@ use tokio::time::{sleep, Duration};
 
 use super::{load_accounts, switch_to_account, update_account_chatgpt_tokens};
 use crate::api::{fetch_account_metadata_for_account, ChatgptRequestOutcome};
-use crate::types::{AuthData, StoredAccount};
+use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -63,8 +63,8 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         .refresh_token
         .unwrap_or_else(|| current_refresh_token.clone());
 
-    let (email, plan_type, parsed_account_id) = parse_id_token_claims(&next_id_token);
-    let next_account_id = parsed_account_id.or(current_account_id);
+    let claims = parse_chatgpt_id_token_claims(&next_id_token);
+    let next_account_id = claims.account_id.or(current_account_id);
 
     let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
 
@@ -74,8 +74,9 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         refreshed.access_token,
         next_refresh_token,
         next_account_id,
-        email,
-        plan_type,
+        claims.email,
+        claims.plan_type,
+        claims.subscription_expires_at,
     )?;
 
     // Keep ~/.codex/auth.json in sync when this is the active account.
@@ -103,16 +104,17 @@ pub async fn create_chatgpt_account_from_refresh_token(
         .id_token
         .context("Refresh response did not include id_token")?;
     let next_refresh_token = refreshed.refresh_token.unwrap_or(refresh_token);
-    let (email, plan_type, account_id) = parse_id_token_claims(&id_token);
+    let claims = parse_chatgpt_id_token_claims(&id_token);
 
     let mut account = StoredAccount::new_chatgpt(
         account_name,
-        email,
-        plan_type,
+        claims.email,
+        claims.plan_type,
+        claims.subscription_expires_at,
         id_token,
         refreshed.access_token,
         next_refresh_token,
-        account_id,
+        claims.account_id,
     );
 
     if let Ok(ChatgptRequestOutcome::Success(metadata)) =
@@ -122,6 +124,9 @@ pub async fn create_chatgpt_account_from_refresh_token(
         account.team_info_updated_at = Some(Utc::now());
         if let Some(plan_type) = metadata.plan_type {
             account.plan_type = Some(plan_type);
+        }
+        if let Some(subscription_expires_at) = metadata.subscription_expires_at {
+            account.subscription_expires_at = Some(subscription_expires_at);
         }
     }
 
@@ -146,36 +151,6 @@ fn parse_jwt_exp(token: &str) -> Option<i64> {
         .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     json.get("exp").and_then(|v| v.as_i64())
-}
-
-fn parse_id_token_claims(id_token: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return (None, None, None);
-    }
-
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => return (None, None, None),
-    };
-
-    let json: serde_json::Value = match serde_json::from_slice(&payload) {
-        Ok(v) => v,
-        Err(_) => return (None, None, None),
-    };
-
-    let email = json.get("email").and_then(|v| v.as_str()).map(String::from);
-    let auth_claims = json.get("https://api.openai.com/auth");
-    let plan_type = auth_claims
-        .and_then(|auth| auth.get("chatgpt_plan_type"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let account_id = auth_claims
-        .and_then(|auth| auth.get("chatgpt_account_id"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    (email, plan_type, account_id)
 }
 
 async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<RefreshTokenResponse> {

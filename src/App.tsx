@@ -13,6 +13,7 @@ import {
   buildAccountGroups,
   getAccountPrimaryResetAt,
   getAccountRemainingPrimary,
+  getAccountSubscriptionExpiresAt,
   getGroupDefaultAccount,
   getGroupVisibleAccounts,
 } from "@/lib/account-groups";
@@ -82,7 +83,20 @@ function getOtherAccountsSortLabel(sort: SecondaryAccountsSort): string {
   if (sort === "reset_asc") return "Reset: earliest to latest";
   if (sort === "reset_desc") return "Reset: latest to earliest";
   if (sort === "remaining_asc") return "% remaining: lowest to highest";
+  if (sort === "subscription_asc") return "Subscription: earliest";
+  if (sort === "subscription_desc") return "Subscription: latest";
   return "% remaining: highest to lowest";
+}
+
+function compareOptionalTimestamp(
+  left: number | null,
+  right: number | null,
+  direction: "asc" | "desc"
+) {
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return direction === "asc" ? left - right : right - left;
 }
 
 function OtherAccountsLoadingState() {
@@ -429,6 +443,12 @@ function App() {
         getAccountRemainingPrimary(rightDefault) - getAccountRemainingPrimary(leftDefault);
       const resetDiff =
         getAccountPrimaryResetAt(leftDefault) - getAccountPrimaryResetAt(rightDefault);
+      const subscriptionDiff =
+        compareOptionalTimestamp(
+          getAccountSubscriptionExpiresAt(leftDefault),
+          getAccountSubscriptionExpiresAt(rightDefault),
+          otherAccountsSort === "subscription_desc" ? "desc" : "asc"
+        );
       const identityDiff = a.identity.localeCompare(b.identity);
 
       if (otherAccountsSort === "remaining_desc") {
@@ -444,6 +464,20 @@ function App() {
       }
 
       if (otherAccountsSort === "reset_asc") {
+        if (resetDiff !== 0) return resetDiff;
+        if (remainingDiff !== 0) return remainingDiff;
+        return identityDiff;
+      }
+
+      if (otherAccountsSort === "subscription_asc") {
+        if (subscriptionDiff !== 0) return subscriptionDiff;
+        if (resetDiff !== 0) return resetDiff;
+        if (remainingDiff !== 0) return remainingDiff;
+        return identityDiff;
+      }
+
+      if (otherAccountsSort === "subscription_desc") {
+        if (subscriptionDiff !== 0) return subscriptionDiff;
         if (resetDiff !== 0) return resetDiff;
         if (remainingDiff !== 0) return remainingDiff;
         return identityDiff;
@@ -539,6 +573,8 @@ function App() {
                       <SelectItem value="remaining_asc">
                         % remaining: lowest to highest
                       </SelectItem>
+                      <SelectItem value="subscription_asc">Subscription: earliest</SelectItem>
+                      <SelectItem value="subscription_desc">Subscription: latest</SelectItem>
                     </SelectContent>
                   </Select>
                 ) : undefined

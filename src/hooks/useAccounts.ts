@@ -326,7 +326,7 @@ export function useAccounts() {
         .filter((account) => {
           if (account.auth_mode !== "chat_g_p_t") return false;
           if (!options?.onlyMissing) return true;
-          return !account.team_info_updated_at;
+          return !account.team_info_updated_at || !account.subscription_expires_at;
         })
         .map((account) => account.id);
 
