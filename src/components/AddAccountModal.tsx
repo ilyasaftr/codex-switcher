@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Copy, ExternalLink, FileJson2, Globe, LoaderCircle } from "lucide-react";
 
 import {
@@ -46,9 +46,18 @@ export function AddAccountModal({
   const [oauthPending, setOauthPending] = useState(false);
   const [authUrl, setAuthUrl] = useState("");
   const [copied, setCopied] = useState(false);
+  const oauthFlowIdRef = useRef(0);
+  const copyTimerRef = useRef<number | null>(null);
   const tauriRuntime = isTauriRuntime();
 
+  const clearCopyTimer = () => {
+    if (copyTimerRef.current === null) return;
+    window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = null;
+  };
+
   const resetForm = () => {
+    clearCopyTimer();
     setFileSource(null);
     setError(null);
     setLoading(false);
@@ -57,9 +66,17 @@ export function AddAccountModal({
     setCopied(false);
   };
 
+  const invalidateOAuthFlow = () => {
+    oauthFlowIdRef.current += 1;
+    clearCopyTimer();
+  };
+
+  const hasActiveOAuthFlow = activeTab === "oauth" && (loading || oauthPending || Boolean(authUrl));
+
   const handleOpenChange = (open: boolean) => {
     if (open) return;
-    if (oauthPending) {
+    if (hasActiveOAuthFlow) {
+      invalidateOAuthFlow();
       void onCancelOAuth();
     }
     resetForm();
@@ -67,17 +84,30 @@ export function AddAccountModal({
   };
 
   const handleOAuthLogin = async () => {
+    const flowId = oauthFlowIdRef.current + 1;
+    oauthFlowIdRef.current = flowId;
+
     try {
       setLoading(true);
       setError(null);
+      setCopied(false);
       const info = await onStartOAuth();
+      if (oauthFlowIdRef.current !== flowId) {
+        void onCancelOAuth();
+        return;
+      }
+
       setAuthUrl(info.auth_url);
       setOauthPending(true);
       setLoading(false);
 
       await onCompleteOAuth();
-      handleOpenChange(false);
+      if (oauthFlowIdRef.current !== flowId) return;
+      invalidateOAuthFlow();
+      resetForm();
+      onClose();
     } catch (err) {
+      if (oauthFlowIdRef.current !== flowId) return;
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
       setOauthPending(false);
@@ -111,13 +141,40 @@ export function AddAccountModal({
   };
 
   const switchTab = (tab: Tab) => {
-    if (oauthPending) {
+    if (tab === activeTab) return;
+
+    if (hasActiveOAuthFlow) {
+      invalidateOAuthFlow();
       void onCancelOAuth().catch((err) => console.error("Failed to cancel login:", err));
       setOauthPending(false);
       setLoading(false);
+      setAuthUrl("");
+      setCopied(false);
     }
     setError(null);
     setActiveTab(tab);
+  };
+
+  const handleCopyAuthUrl = () => {
+    setError(null);
+    clearCopyTimer();
+    void navigator.clipboard
+      .writeText(authUrl)
+      .then(() => {
+        setCopied(true);
+        copyTimerRef.current = window.setTimeout(() => {
+          setCopied(false);
+          copyTimerRef.current = null;
+        }, 1500);
+      })
+      .catch(() => setError("Clipboard unavailable. Copy the URL manually."));
+  };
+
+  const handleOpenAuthUrl = () => {
+    setError(null);
+    void openExternalUrl(authUrl).catch((err) =>
+      setError(err instanceof Error ? err.message : String(err))
+    );
   };
 
   const methodCardClass = (tab: Tab) =>
@@ -130,9 +187,10 @@ export function AddAccountModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-2xl gap-5 [&>button]:right-5 [&>button]:top-5 [&>button]:rounded-full [&>button]:border [&>button]:border-transparent [&>button]:bg-background/70 [&>button]:p-1.5 [&>button]:text-muted-foreground [&>button]:hover:bg-muted/70 [&>button]:hover:text-foreground">
+      <DialogContent className="grid max-h-[calc(100dvh-2rem)] max-w-2xl grid-rows-[minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:rounded-full [&>button]:border [&>button]:border-transparent [&>button]:bg-background/70 [&>button]:p-1.5 [&>button]:text-muted-foreground [&>button]:hover:bg-muted/70 [&>button]:hover:text-foreground sm:[&>button]:right-5 sm:[&>button]:top-5">
+        <div className="min-h-0 overflow-y-auto px-5 pb-4 pt-6 sm:px-6 sm:pb-5 sm:pt-6">
         <DialogHeader className="gap-2 pr-10">
-          <DialogTitle className="text-[2rem] leading-none tracking-[-0.03em]">
+          <DialogTitle className="text-[1.75rem] leading-none sm:text-[2rem]">
             Add Account
           </DialogTitle>
           <DialogDescription>
@@ -140,7 +198,7 @@ export function AddAccountModal({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
           <button
             type="button"
             onClick={() => switchTab("oauth")}
@@ -188,7 +246,7 @@ export function AddAccountModal({
         </div>
 
         {activeTab === "oauth" ? (
-          <div className="rounded-2xl border border-border/70 bg-muted/14 p-5">
+          <div className="mt-5 rounded-2xl border border-border/70 bg-muted/14 p-4 sm:p-5">
             {oauthPending ? (
               <div className="space-y-4">
                 <div className="flex items-start gap-3">
@@ -207,27 +265,24 @@ export function AddAccountModal({
                   <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                     Login URL
                   </div>
-                  <Input readOnly value={authUrl} className="font-mono text-xs" />
-                  <div className="flex flex-wrap gap-2">
+                  <Input
+                    readOnly
+                    value={authUrl}
+                    title={authUrl}
+                    className="min-w-0 overflow-x-auto font-mono text-xs"
+                  />
+                  <div className="grid gap-2 sm:flex sm:flex-wrap">
+                    <Button size="sm" onClick={handleOpenAuthUrl}>
+                      <ExternalLink />
+                      Open in Browser
+                    </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
-                        void navigator.clipboard
-                          .writeText(authUrl)
-                          .then(() => {
-                            setCopied(true);
-                            setTimeout(() => setCopied(false), 1500);
-                          })
-                          .catch(() => setError("Clipboard unavailable. Copy the URL manually."));
-                      }}
+                      onClick={handleCopyAuthUrl}
                     >
                       <Copy />
                       {copied ? "Copied" : "Copy URL"}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => void openExternalUrl(authUrl)}>
-                      <ExternalLink />
-                      Open in Browser
                     </Button>
                   </div>
                 </div>
@@ -249,11 +304,16 @@ export function AddAccountModal({
                     <p>Email and account metadata are pulled automatically after login.</p>
                   </div>
                 </div>
+                {!tauriRuntime ? (
+                  <p className="rounded-xl border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:border-amber-800/70 dark:text-amber-300">
+                    The callback uses `localhost`, so the browser flow must complete on the same host.
+                  </p>
+                ) : null}
               </div>
             )}
           </div>
         ) : (
-          <div className="rounded-2xl border border-border/70 bg-muted/14 p-5">
+          <div className="mt-5 rounded-2xl border border-border/70 bg-muted/14 p-4 sm:p-5">
             <div className="flex items-start gap-3">
               <div className="rounded-full border border-border/70 bg-background/80 p-2">
                 <FileJson2 className="size-4 text-muted-foreground" />
@@ -262,7 +322,7 @@ export function AddAccountModal({
                 <div className="text-sm text-muted-foreground">
                   Choose a Codex `auth.json` file to import this account.
                 </div>
-                <div className="flex gap-2">
+                <div className="grid gap-2 sm:flex">
                   <Input readOnly value={describeFileSource(fileSource)} className="flex-1" />
                   <Button variant="outline" onClick={() => void handleSelectFile()}>
                     Browse
@@ -274,26 +334,34 @@ export function AddAccountModal({
         )}
 
         {error ? (
-          <div className="rounded-xl border border-amber-300/50 bg-amber-500/8 px-4 py-3 text-sm text-amber-800 dark:border-amber-800/70 dark:text-amber-200">
+          <div className="mt-4 rounded-xl border border-destructive/35 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {error}
           </div>
         ) : null}
+        </div>
 
-        <DialogFooter className="pt-1">
+        <DialogFooter className="border-t border-border/70 bg-background/95 px-5 py-4 sm:px-6">
           <Button variant="outline" onClick={() => handleOpenChange(false)}>
-            Cancel
+            {hasActiveOAuthFlow ? "Close & Cancel Login" : "Cancel"}
           </Button>
-          <Button
-            onClick={() => void (activeTab === "oauth" ? handleOAuthLogin() : handleImportFile())}
-            disabled={loading || (activeTab === "oauth" && oauthPending)}
-          >
-            {loading ? <LoaderCircle className="animate-spin" /> : null}
-            {loading
-              ? "Processing"
-              : activeTab === "oauth"
-                ? "Generate Login Link"
-                : "Import Account"}
-          </Button>
+          {activeTab === "oauth" && oauthPending ? (
+            <Button disabled>
+              <LoaderCircle className="animate-spin" />
+              Waiting for Login
+            </Button>
+          ) : (
+            <Button
+              onClick={() => void (activeTab === "oauth" ? handleOAuthLogin() : handleImportFile())}
+              disabled={loading}
+            >
+              {loading ? <LoaderCircle className="animate-spin" /> : null}
+              {loading
+                ? "Processing"
+                : activeTab === "oauth"
+                  ? "Generate Login Link"
+                  : "Import Account"}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

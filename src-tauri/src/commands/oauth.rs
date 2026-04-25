@@ -12,7 +12,7 @@ use crate::auth::{
 use crate::types::{AccountInfo, OAuthLoginInfo};
 
 struct PendingOAuth {
-    rx: oneshot::Receiver<anyhow::Result<OAuthLoginResult>>,
+    rx: Option<oneshot::Receiver<anyhow::Result<OAuthLoginResult>>>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -35,7 +35,10 @@ pub async fn start_login() -> Result<OAuthLoginInfo, String> {
     // Store the receiver for later
     {
         let mut pending = PENDING_OAUTH.lock().unwrap();
-        *pending = Some(PendingOAuth { rx, cancelled });
+        *pending = Some(PendingOAuth {
+            rx: Some(rx),
+            cancelled,
+        });
     }
 
     Ok(info)
@@ -44,16 +47,32 @@ pub async fn start_login() -> Result<OAuthLoginInfo, String> {
 /// Wait for the OAuth login to complete and add the account
 #[tauri::command]
 pub async fn complete_login() -> Result<AccountInfo, String> {
-    let pending = {
+    let (rx, cancelled) = {
         let mut pending = PENDING_OAUTH.lock().unwrap();
-        pending
+        let pending = pending
+            .as_mut()
+            .ok_or_else(|| "No pending OAuth login".to_string())?;
+        let rx = pending
+            .rx
             .take()
-            .ok_or_else(|| "No pending OAuth login".to_string())?
+            .ok_or_else(|| "OAuth login is already waiting".to_string())?;
+        (rx, pending.cancelled.clone())
     };
 
-    let account = wait_for_oauth_login(pending.rx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let login_result = wait_for_oauth_login(rx).await;
+
+    {
+        let mut pending = PENDING_OAUTH.lock().unwrap();
+        if pending
+            .as_ref()
+            .map(|pending| Arc::ptr_eq(&pending.cancelled, &cancelled))
+            .unwrap_or(false)
+        {
+            pending.take();
+        }
+    }
+
+    let account = login_result.map_err(|e| e.to_string())?;
 
     let had_active_account = load_accounts()
         .map_err(|e| e.to_string())?
@@ -96,4 +115,30 @@ pub async fn cancel_login() -> Result<(), String> {
         pending_oauth.cancelled.store(true, Ordering::Relaxed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_login_stops_waiting_complete_login() {
+        let _ = cancel_login().await;
+        let _info = start_login().await.expect("start login");
+
+        let waiter = tokio::spawn(async { complete_login().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        cancel_login().await.expect("cancel login");
+
+        let result = tokio::time::timeout(Duration::from_secs(3), waiter)
+            .await
+            .expect("complete_login should exit after cancellation")
+            .expect("join complete_login task");
+
+        assert!(result
+            .expect_err("cancelled login should not complete successfully")
+            .contains("cancelled"));
+    }
 }
