@@ -22,8 +22,8 @@ export function useAccounts() {
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
   const handledAutoRemovedRef = useRef<Set<string>>(new Set());
-  const maxConcurrentUsageRequests = 10;
-  const maxConcurrentMetadataRequests = 4;
+  const maxConcurrentUsageRequests = 16;
+  const maxConcurrentMetadataRequests = 8;
 
   useEffect(() => {
     accountsRef.current = accounts;
@@ -379,8 +379,22 @@ export function useAccounts() {
   const refreshAllAccounts = useCallback(
     async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
       const list = accountList ?? accountsRef.current;
-      const nextList = await refreshAccountsMetadata(list);
-      await refreshUsage(nextList);
+      const [metadataResult, usageResult] = await Promise.allSettled([
+        refreshAccountsMetadata(list),
+        refreshUsage(list),
+      ]);
+
+      if (metadataResult.status === "rejected") {
+        console.error("Failed to refresh account metadata:", metadataResult.reason);
+      }
+
+      if (usageResult.status === "rejected") {
+        console.error("Failed to refresh usage:", usageResult.reason);
+      }
+
+      if (metadataResult.status === "rejected" && usageResult.status === "rejected") {
+        throw usageResult.reason;
+      }
     },
     [refreshAccountsMetadata, refreshUsage]
   );

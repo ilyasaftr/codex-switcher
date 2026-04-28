@@ -285,7 +285,7 @@ function App() {
   };
 
   const handleRefresh = async () => {
-    const id = toast.loading("Refreshing account metadata and live usage.");
+    const id = toast.loading("Refreshing accounts in parallel.");
     setIsRefreshing(true);
     try {
       await refreshAllAccounts();

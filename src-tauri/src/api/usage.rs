@@ -169,10 +169,10 @@ pub(crate) async fn fetch_account_metadata_for_account(
     account: &StoredAccount,
 ) -> Result<ChatgptRequestOutcome<AccountMetadata>> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
-    let team_response =
-        send_chatgpt_team_accounts_check_request(access_token, chatgpt_account_id).await?;
-    let subscription_response =
-        send_chatgpt_subscription_accounts_check_request(access_token, chatgpt_account_id).await?;
+    let (team_response, subscription_response) = tokio::try_join!(
+        send_chatgpt_team_accounts_check_request(access_token, chatgpt_account_id),
+        send_chatgpt_subscription_accounts_check_request(access_token, chatgpt_account_id)
+    )?;
 
     fetch_account_metadata_from_response(account, team_response, subscription_response).await
 }

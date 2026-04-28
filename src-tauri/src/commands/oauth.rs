@@ -160,7 +160,7 @@ pub async fn cancel_all_logins() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::oauth_server::DEFAULT_PORT;
+    use crate::auth::oauth_server::oauth_callback_port;
 
     static TEST_OAUTH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -173,14 +173,13 @@ mod tests {
         let second = start_login().await.expect("start second login");
 
         assert_ne!(first.flow_id, second.flow_id);
-        assert_eq!(first.callback_port, DEFAULT_PORT);
-        assert_eq!(second.callback_port, DEFAULT_PORT);
-        assert!(first
-            .auth_url
-            .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
-        assert!(second
-            .auth_url
-            .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        let callback_port = oauth_callback_port();
+        let encoded_redirect =
+            format!("redirect_uri=http%3A%2F%2Flocalhost%3A{callback_port}%2Fauth%2Fcallback");
+        assert_eq!(first.callback_port, callback_port);
+        assert_eq!(second.callback_port, callback_port);
+        assert!(first.auth_url.contains(&encoded_redirect));
+        assert!(second.auth_url.contains(&encoded_redirect));
 
         with_pending_oauth(|pending| {
             assert!(pending.contains_key(&first.flow_id));
@@ -198,7 +197,8 @@ mod tests {
         let first = start_login().await.expect("start first login");
         let second = start_login().await.expect("start second login");
         let response = reqwest::get(format!(
-            "http://127.0.0.1:{DEFAULT_PORT}/auth/callback?state=unknown&code=fake"
+            "http://127.0.0.1:{}/auth/callback?state=unknown&code=fake",
+            oauth_callback_port()
         ))
         .await
         .expect("unknown state callback response");

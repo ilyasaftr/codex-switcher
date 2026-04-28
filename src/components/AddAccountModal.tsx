@@ -275,7 +275,12 @@ export function AddAccountModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="grid max-h-[calc(100dvh-2rem)] max-w-2xl grid-rows-[minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:rounded-full [&>button]:border [&>button]:border-transparent [&>button]:bg-background/70 [&>button]:p-1.5 [&>button]:text-muted-foreground [&>button]:hover:bg-muted/70 [&>button]:hover:text-foreground sm:[&>button]:right-5 sm:[&>button]:top-5">
+      <DialogContent
+        onInteractOutside={(event) => {
+          if (hasActiveOAuthFlow) event.preventDefault();
+        }}
+        className="grid max-h-[calc(100dvh-2rem)] max-w-2xl grid-rows-[minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:rounded-full [&>button]:border [&>button]:border-transparent [&>button]:bg-background/70 [&>button]:p-1.5 [&>button]:text-muted-foreground [&>button]:hover:bg-muted/70 [&>button]:hover:text-foreground sm:[&>button]:right-5 sm:[&>button]:top-5"
+      >
         <div className="min-h-0 overflow-y-auto px-5 pb-4 pt-6 sm:px-6 sm:pb-5 sm:pt-6">
         <DialogHeader className="gap-2 pr-10">
           <DialogTitle className="text-[1.75rem] leading-none sm:text-[2rem]">

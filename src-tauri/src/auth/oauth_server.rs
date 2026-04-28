@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +21,30 @@ const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const DEFAULT_PORT: u16 = 1455; // Same as official Codex
 const OAUTH_LOGIN_TIMEOUT_SECONDS: u64 = 300;
+
+#[cfg(test)]
+static TEST_CALLBACK_PORT: OnceLock<u16> = OnceLock::new();
+
+pub(crate) fn oauth_callback_port() -> u16 {
+    #[cfg(test)]
+    {
+        *TEST_CALLBACK_PORT.get_or_init(|| {
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind test OAuth callback port");
+            let port = listener
+                .local_addr()
+                .expect("read test OAuth callback port")
+                .port();
+            drop(listener);
+            port
+        })
+    }
+
+    #[cfg(not(test))]
+    {
+        DEFAULT_PORT
+    }
+}
 
 /// PKCE codes for OAuth
 #[derive(Debug, Clone)]
@@ -189,9 +215,10 @@ fn ensure_shared_oauth_server() -> Result<Arc<Mutex<HashMap<String, SharedOAuthF
         return Ok(server.flows.clone());
     }
 
-    let server = Server::http(format!("127.0.0.1:{DEFAULT_PORT}")).map_err(|err| {
+    let callback_port = oauth_callback_port();
+    let server = Server::http(format!("127.0.0.1:{callback_port}")).map_err(|err| {
         anyhow::anyhow!(
-            "OAuth callback port {DEFAULT_PORT} is unavailable: {err}. Close the other process using this port and try again."
+            "OAuth callback port {callback_port} is unavailable: {err}. Close the other process using this port and try again."
         )
     })?;
     let server = Arc::new(server);
@@ -204,7 +231,7 @@ fn ensure_shared_oauth_server() -> Result<Arc<Mutex<HashMap<String, SharedOAuthF
         runtime.block_on(run_shared_oauth_server(server_handle, server_flows));
     });
 
-    println!("[OAuth] Shared callback server started on port {DEFAULT_PORT}");
+    println!("[OAuth] Shared callback server started on port {callback_port}");
     *shared = Some(SharedOAuthServer {
         flows: flows.clone(),
     });
@@ -223,7 +250,8 @@ pub async fn start_oauth_login(
 
     println!("[OAuth] PKCE challenge: {}", &pkce.code_challenge[..20]);
 
-    let redirect_uri = format!("http://localhost:{DEFAULT_PORT}/auth/callback");
+    let callback_port = oauth_callback_port();
+    let redirect_uri = format!("http://localhost:{callback_port}/auth/callback");
     let auth_url = build_authorize_url(DEFAULT_ISSUER, CLIENT_ID, &redirect_uri, &pkce, &state);
 
     println!("[OAuth] Redirect URI: {redirect_uri}");
@@ -232,7 +260,7 @@ pub async fn start_oauth_login(
     let login_info = OAuthLoginInfo {
         flow_id: flow_id.clone(),
         auth_url: auth_url.clone(),
-        callback_port: DEFAULT_PORT,
+        callback_port,
         created_at,
     };
 
@@ -399,7 +427,7 @@ async fn handle_oauth_request(
         println!("[OAuth] Got authorization code, exchanging for tokens...");
 
         // Exchange code for tokens
-        let redirect_uri = format!("http://localhost:{DEFAULT_PORT}/auth/callback");
+        let redirect_uri = format!("http://localhost:{}/auth/callback", oauth_callback_port());
         match exchange_code_for_tokens(DEFAULT_ISSUER, CLIENT_ID, &redirect_uri, &flow.pkce, &code)
             .await
         {
