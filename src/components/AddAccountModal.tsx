@@ -19,17 +19,25 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import type { OAuthLoginInfo } from "@/types";
 
 interface AddAccountModalProps {
   isOpen: boolean;
   onClose: () => void;
   onImportFile: (source: FileSource) => Promise<void>;
-  onStartOAuth: () => Promise<{ auth_url: string }>;
-  onCompleteOAuth: () => Promise<unknown>;
-  onCancelOAuth: () => Promise<void>;
+  onStartOAuth: () => Promise<OAuthLoginInfo>;
+  onCompleteOAuth: (flowId: string) => Promise<unknown>;
+  onCancelOAuth: (flowId: string) => Promise<void>;
+  onCancelAllOAuth: () => Promise<void>;
 }
 
 type Tab = "oauth" | "import";
+type OAuthFlowStatus = "waiting" | "completing" | "completed" | "failed" | "canceled" | "timed_out";
+
+interface OAuthFlowRow extends OAuthLoginInfo {
+  status: OAuthFlowStatus;
+  error?: string | null;
+}
 
 export function AddAccountModal({
   isOpen,
@@ -38,16 +46,16 @@ export function AddAccountModal({
   onStartOAuth,
   onCompleteOAuth,
   onCancelOAuth,
+  onCancelAllOAuth,
 }: AddAccountModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [oauthPending, setOauthPending] = useState(false);
-  const [authUrl, setAuthUrl] = useState("");
-  const [copied, setCopied] = useState(false);
-  const oauthFlowIdRef = useRef(0);
+  const [oauthFlows, setOauthFlows] = useState<OAuthFlowRow[]>([]);
+  const [copiedFlowId, setCopiedFlowId] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const removeTimersRef = useRef<Map<string, number>>(new Map());
   const tauriRuntime = isTauriRuntime();
 
   const clearCopyTimer = () => {
@@ -56,61 +64,117 @@ export function AddAccountModal({
     copyTimerRef.current = null;
   };
 
+  const clearRemoveTimers = () => {
+    removeTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    removeTimersRef.current.clear();
+  };
+
   const resetForm = () => {
     clearCopyTimer();
+    clearRemoveTimers();
     setFileSource(null);
     setError(null);
     setLoading(false);
-    setOauthPending(false);
-    setAuthUrl("");
-    setCopied(false);
+    setOauthFlows([]);
+    setCopiedFlowId(null);
   };
 
-  const invalidateOAuthFlow = () => {
-    oauthFlowIdRef.current += 1;
-    clearCopyTimer();
-  };
-
-  const hasActiveOAuthFlow = activeTab === "oauth" && (loading || oauthPending || Boolean(authUrl));
+  const hasActiveOAuthFlow =
+    activeTab === "oauth" &&
+    (loading || oauthFlows.some((flow) => flow.status === "waiting" || flow.status === "completing"));
 
   const handleOpenChange = (open: boolean) => {
     if (open) return;
     if (hasActiveOAuthFlow) {
-      invalidateOAuthFlow();
-      void onCancelOAuth();
+      void onCancelAllOAuth();
     }
     resetForm();
     onClose();
   };
 
-  const handleOAuthLogin = async () => {
-    const flowId = oauthFlowIdRef.current + 1;
-    oauthFlowIdRef.current = flowId;
+  const scheduleFlowRemoval = (flowId: string, onRemoved?: () => void) => {
+    const existingTimer = removeTimersRef.current.get(flowId);
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+    }
 
+    const timer = window.setTimeout(() => {
+      removeTimersRef.current.delete(flowId);
+      setOauthFlows((current) => current.filter((flow) => flow.flow_id !== flowId));
+      onRemoved?.();
+    }, 1200);
+
+    removeTimersRef.current.set(flowId, timer);
+  };
+
+  const maybeCloseAfterCompletion = (flowId: string) => {
+    setOauthFlows((current) => {
+      const remainingActive = current.some(
+        (flow) =>
+          flow.flow_id !== flowId && (flow.status === "waiting" || flow.status === "completing")
+      );
+      if (!remainingActive) {
+        scheduleFlowRemoval(flowId, () => {
+          resetForm();
+          onClose();
+        });
+      }
+      return current;
+    });
+  };
+
+  const completeOAuthFlow = async (flowId: string) => {
+    try {
+      setOauthFlows((current) =>
+        current.map((flow) =>
+          flow.flow_id === flowId ? { ...flow, status: "completing", error: null } : flow
+        )
+      );
+      await onCompleteOAuth(flowId);
+      setOauthFlows((current) =>
+        current.map((flow) =>
+          flow.flow_id === flowId ? { ...flow, status: "completed", error: null } : flow
+        )
+      );
+      maybeCloseAfterCompletion(flowId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const normalizedMessage = message.toLowerCase();
+      const status: OAuthFlowStatus =
+        normalizedMessage.includes("cancelled") || normalizedMessage.includes("canceled")
+          ? "canceled"
+          : normalizedMessage.includes("timed out")
+            ? "timed_out"
+            : "failed";
+      setOauthFlows((current) =>
+        current.map((flow) =>
+          flow.flow_id === flowId
+            ? { ...flow, status, error: status === "canceled" ? null : message }
+            : flow
+        )
+      );
+    }
+  };
+
+  const handleOAuthLogin = async () => {
     try {
       setLoading(true);
       setError(null);
-      setCopied(false);
+      setCopiedFlowId(null);
       const info = await onStartOAuth();
-      if (oauthFlowIdRef.current !== flowId) {
-        void onCancelOAuth();
-        return;
-      }
-
-      setAuthUrl(info.auth_url);
-      setOauthPending(true);
+      setOauthFlows((current) => [
+        ...current,
+        {
+          ...info,
+          status: "waiting",
+          error: null,
+        },
+      ]);
       setLoading(false);
-
-      await onCompleteOAuth();
-      if (oauthFlowIdRef.current !== flowId) return;
-      invalidateOAuthFlow();
-      resetForm();
-      onClose();
+      void completeOAuthFlow(info.flow_id);
     } catch (err) {
-      if (oauthFlowIdRef.current !== flowId) return;
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
-      setOauthPending(false);
     }
   };
 
@@ -144,37 +208,61 @@ export function AddAccountModal({
     if (tab === activeTab) return;
 
     if (hasActiveOAuthFlow) {
-      invalidateOAuthFlow();
-      void onCancelOAuth().catch((err) => console.error("Failed to cancel login:", err));
-      setOauthPending(false);
+      void onCancelAllOAuth().catch((err) => console.error("Failed to cancel logins:", err));
       setLoading(false);
-      setAuthUrl("");
-      setCopied(false);
+      setOauthFlows([]);
+      setCopiedFlowId(null);
     }
     setError(null);
     setActiveTab(tab);
   };
 
-  const handleCopyAuthUrl = () => {
+  const handleCopyAuthUrl = (flow: OAuthFlowRow) => {
     setError(null);
     clearCopyTimer();
     void navigator.clipboard
-      .writeText(authUrl)
+      .writeText(flow.auth_url)
       .then(() => {
-        setCopied(true);
+        setCopiedFlowId(flow.flow_id);
         copyTimerRef.current = window.setTimeout(() => {
-          setCopied(false);
+          setCopiedFlowId(null);
           copyTimerRef.current = null;
         }, 1500);
       })
       .catch(() => setError("Clipboard unavailable. Copy the URL manually."));
   };
 
-  const handleOpenAuthUrl = () => {
+  const handleOpenAuthUrl = (flow: OAuthFlowRow) => {
     setError(null);
-    void openExternalUrl(authUrl).catch((err) =>
+    void openExternalUrl(flow.auth_url).catch((err) =>
       setError(err instanceof Error ? err.message : String(err))
     );
+  };
+
+  const handleCancelOAuthFlow = (flowId: string) => {
+    setOauthFlows((current) =>
+      current.map((flow) =>
+        flow.flow_id === flowId ? { ...flow, status: "canceled", error: null } : flow
+      )
+    );
+    void onCancelOAuth(flowId);
+    scheduleFlowRemoval(flowId);
+  };
+
+  const getFlowStatusLabel = (status: OAuthFlowStatus) => {
+    switch (status) {
+      case "waiting":
+      case "completing":
+        return "Waiting";
+      case "completed":
+        return "Completed";
+      case "failed":
+        return "Failed";
+      case "canceled":
+        return "Canceled";
+      case "timed_out":
+        return "Timed out";
+    }
   };
 
   const methodCardClass = (tab: Tab) =>
@@ -247,70 +335,96 @@ export function AddAccountModal({
 
         {activeTab === "oauth" ? (
           <div className="mt-5 rounded-2xl border border-border/70 bg-muted/14 p-4 sm:p-5">
-            {oauthPending ? (
-              <div className="space-y-4">
-                <div className="flex items-start gap-3">
-                  <div className="rounded-full border border-border/70 bg-background/80 p-2">
+            <div className="space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="rounded-full border border-border/70 bg-background/80 p-2">
+                  {hasActiveOAuthFlow ? (
                     <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-sm font-medium">Browser login is waiting</div>
-                    <div className="text-sm text-muted-foreground">
-                      Open the generated link and finish authentication.
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-                    Login URL
-                  </div>
-                  <Input
-                    readOnly
-                    value={authUrl}
-                    title={authUrl}
-                    className="min-w-0 overflow-x-auto font-mono text-xs"
-                  />
-                  <div className="grid gap-2 sm:flex sm:flex-wrap">
-                    <Button size="sm" onClick={handleOpenAuthUrl}>
-                      <ExternalLink />
-                      Open in Browser
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleCopyAuthUrl}
-                    >
-                      <Copy />
-                      {copied ? "Copied" : "Copy URL"}
-                    </Button>
-                  </div>
-                </div>
-
-                {!tauriRuntime ? (
-                  <p className="rounded-xl border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:border-amber-800/70 dark:text-amber-300">
-                    The callback uses `localhost`, so the browser flow must complete on the same host.
-                  </p>
-                ) : null}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="flex items-start gap-3">
-                  <div className="rounded-full border border-border/70 bg-background/80 p-2">
+                  ) : (
                     <Globe className="size-4 text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1 text-sm text-muted-foreground">
-                    <p>Generate a secure login link and finish sign-in in your browser.</p>
-                    <p>Email and account metadata are pulled automatically after login.</p>
-                  </div>
+                  )}
                 </div>
-                {!tauriRuntime ? (
-                  <p className="rounded-xl border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:border-amber-800/70 dark:text-amber-300">
-                    The callback uses `localhost`, so the browser flow must complete on the same host.
-                  </p>
-                ) : null}
+                <div className="space-y-1 text-sm text-muted-foreground">
+                  <p>Generate secure login links and finish sign-in in your browser.</p>
+                  <p>Email and account metadata are pulled automatically after each login.</p>
+                </div>
               </div>
-            )}
+
+              {oauthFlows.length > 0 ? (
+                <div className="space-y-3">
+                  {oauthFlows.map((flow, index) => {
+                    const isActive =
+                      flow.status === "waiting" || flow.status === "completing";
+                    return (
+                      <div
+                        key={flow.flow_id}
+                        className="space-y-2 rounded-xl border border-border/70 bg-background/70 p-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                            Login URL {index + 1}
+                          </div>
+                          <div
+                            className={cn(
+                              "rounded-full border px-2 py-0.5 text-xs font-medium",
+                              flow.status === "failed" || flow.status === "timed_out"
+                                ? "border-destructive/35 bg-destructive/10 text-destructive"
+                                : "border-border/70 bg-muted/35 text-muted-foreground"
+                            )}
+                          >
+                            {getFlowStatusLabel(flow.status)}
+                          </div>
+                        </div>
+                        <Input
+                          readOnly
+                          value={flow.auth_url}
+                          title={flow.auth_url}
+                          className="min-w-0 overflow-x-auto font-mono text-xs"
+                        />
+                        <div className="grid gap-2 sm:flex sm:flex-wrap">
+                          <Button
+                            size="sm"
+                            onClick={() => handleOpenAuthUrl(flow)}
+                            disabled={!isActive}
+                          >
+                            <ExternalLink />
+                            Open
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleCopyAuthUrl(flow)}
+                          >
+                            <Copy />
+                            {copiedFlowId === flow.flow_id ? "Copied" : "Copy"}
+                          </Button>
+                          {isActive ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleCancelOAuthFlow(flow.flow_id)}
+                            >
+                              Cancel
+                            </Button>
+                          ) : null}
+                        </div>
+                        {flow.error ? (
+                          <div className="rounded-lg border border-destructive/35 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                            {flow.error}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {!tauriRuntime ? (
+                <p className="rounded-xl border border-amber-300/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:border-amber-800/70 dark:text-amber-300">
+                  The callback uses `localhost`, so each browser flow must complete on the same host.
+                </p>
+              ) : null}
+            </div>
           </div>
         ) : (
           <div className="mt-5 rounded-2xl border border-border/70 bg-muted/14 p-4 sm:p-5">
@@ -342,26 +456,19 @@ export function AddAccountModal({
 
         <DialogFooter className="border-t border-border/70 bg-background/95 px-5 py-4 sm:px-6">
           <Button variant="outline" onClick={() => handleOpenChange(false)}>
-            {hasActiveOAuthFlow ? "Close & Cancel Login" : "Cancel"}
+            {hasActiveOAuthFlow ? "Close & Cancel Logins" : "Cancel"}
           </Button>
-          {activeTab === "oauth" && oauthPending ? (
-            <Button disabled>
-              <LoaderCircle className="animate-spin" />
-              Waiting for Login
-            </Button>
-          ) : (
-            <Button
-              onClick={() => void (activeTab === "oauth" ? handleOAuthLogin() : handleImportFile())}
-              disabled={loading}
-            >
-              {loading ? <LoaderCircle className="animate-spin" /> : null}
-              {loading
-                ? "Processing"
-                : activeTab === "oauth"
-                  ? "Generate Login Link"
-                  : "Import Account"}
-            </Button>
-          )}
+          <Button
+            onClick={() => void (activeTab === "oauth" ? handleOAuthLogin() : handleImportFile())}
+            disabled={loading}
+          >
+            {loading ? <LoaderCircle className="animate-spin" /> : null}
+            {loading
+              ? "Processing"
+              : activeTab === "oauth"
+                ? "Generate Login Link"
+                : "Import Account"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

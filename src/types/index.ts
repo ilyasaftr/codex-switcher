@@ -45,8 +45,10 @@ export interface UsageQueryResult {
 }
 
 export interface OAuthLoginInfo {
+  flow_id: string;
   auth_url: string;
   callback_port: number;
+  created_at: string;
 }
 
 export interface AccountWithUsage extends AccountInfo {

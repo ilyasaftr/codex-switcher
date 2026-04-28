@@ -440,10 +440,14 @@ mod tests {
 /// OAuth login information returned to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthLoginInfo {
+    /// Unique identifier for this pending login flow
+    pub flow_id: String,
     /// The authorization URL to open in browser
     pub auth_url: String,
     /// The local callback port
     pub callback_port: u16,
+    /// Creation timestamp for frontend status display and cleanup
+    pub created_at: String,
 }
 
 // ============================================================================

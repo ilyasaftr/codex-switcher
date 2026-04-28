@@ -1,11 +1,16 @@
 //! OAuth login Tauri commands
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::api::refresh_account_metadata;
-use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
+use crate::auth::oauth_server::{
+    cancel_oauth_state, start_oauth_login, wait_for_oauth_login, OAuthLoginResult,
+};
 use crate::auth::{
     add_account, load_accounts, set_active_account, switch_to_account, touch_account,
 };
@@ -14,63 +19,84 @@ use crate::types::{AccountInfo, OAuthLoginInfo};
 struct PendingOAuth {
     rx: Option<oneshot::Receiver<anyhow::Result<OAuthLoginResult>>>,
     cancelled: Arc<AtomicBool>,
+    created_at: Instant,
+    state: String,
 }
 
-// Global state for pending OAuth login
-static PENDING_OAUTH: Mutex<Option<PendingOAuth>> = Mutex::new(None);
+const OAUTH_LOGIN_TIMEOUT_SECONDS: u64 = 300;
+
+// Global state for pending OAuth login flows.
+static PENDING_OAUTH: Mutex<Option<HashMap<String, PendingOAuth>>> = Mutex::new(None);
+
+fn with_pending_oauth<R>(f: impl FnOnce(&mut HashMap<String, PendingOAuth>) -> R) -> R {
+    let mut pending = PENDING_OAUTH.lock().unwrap();
+    f(pending.get_or_insert_with(HashMap::new))
+}
+
+fn cleanup_expired_flows(pending: &mut HashMap<String, PendingOAuth>) {
+    let timeout = Duration::from_secs(OAUTH_LOGIN_TIMEOUT_SECONDS);
+    pending.retain(|_, flow| {
+        let keep = flow.created_at.elapsed() <= timeout;
+        if !keep {
+            flow.cancelled.store(true, Ordering::Relaxed);
+            cancel_oauth_state(&flow.state);
+        }
+        keep
+    });
+}
 
 /// Start the OAuth login flow
 #[tauri::command]
 pub async fn start_login() -> Result<OAuthLoginInfo, String> {
-    // Cancel any previous pending flow so it does not keep the callback port occupied.
-    if let Some(previous) = {
-        let mut pending = PENDING_OAUTH.lock().unwrap();
-        pending.take()
-    } {
-        previous.cancelled.store(true, Ordering::Relaxed);
-    }
+    with_pending_oauth(cleanup_expired_flows);
 
-    let (info, rx, cancelled) = start_oauth_login().await.map_err(|e| e.to_string())?;
+    let flow_id = Uuid::new_v4().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let registration = start_oauth_login(flow_id.clone(), created_at)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // Store the receiver for later
-    {
-        let mut pending = PENDING_OAUTH.lock().unwrap();
-        *pending = Some(PendingOAuth {
-            rx: Some(rx),
-            cancelled,
-        });
-    }
+    with_pending_oauth(|pending| {
+        pending.insert(
+            flow_id,
+            PendingOAuth {
+                rx: Some(registration.rx),
+                cancelled: registration.cancelled,
+                created_at: Instant::now(),
+                state: registration.state,
+            },
+        );
+    });
 
-    Ok(info)
+    Ok(registration.info)
 }
 
 /// Wait for the OAuth login to complete and add the account
 #[tauri::command]
-pub async fn complete_login() -> Result<AccountInfo, String> {
-    let (rx, cancelled) = {
-        let mut pending = PENDING_OAUTH.lock().unwrap();
-        let pending = pending
-            .as_mut()
-            .ok_or_else(|| "No pending OAuth login".to_string())?;
-        let rx = pending
+pub async fn complete_login(flow_id: String) -> Result<AccountInfo, String> {
+    let (rx, cancelled) = with_pending_oauth(|pending| {
+        cleanup_expired_flows(pending);
+        let pending_flow = pending
+            .get_mut(&flow_id)
+            .ok_or_else(|| "No pending OAuth login for this flow".to_string())?;
+        let rx = pending_flow
             .rx
             .take()
             .ok_or_else(|| "OAuth login is already waiting".to_string())?;
-        (rx, pending.cancelled.clone())
-    };
+        Ok::<_, String>((rx, pending_flow.cancelled.clone()))
+    })?;
 
     let login_result = wait_for_oauth_login(rx).await;
 
-    {
-        let mut pending = PENDING_OAUTH.lock().unwrap();
+    with_pending_oauth(|pending| {
         if pending
-            .as_ref()
-            .map(|pending| Arc::ptr_eq(&pending.cancelled, &cancelled))
+            .get(&flow_id)
+            .map(|pending_flow| Arc::ptr_eq(&pending_flow.cancelled, &cancelled))
             .unwrap_or(false)
         {
-            pending.take();
+            pending.remove(&flow_id);
         }
-    }
+    });
 
     let account = login_result.map_err(|e| e.to_string())?;
 
@@ -109,28 +135,124 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
 
 /// Cancel a pending OAuth login
 #[tauri::command]
-pub async fn cancel_login() -> Result<(), String> {
-    let mut pending = PENDING_OAUTH.lock().unwrap();
-    if let Some(pending_oauth) = pending.take() {
-        pending_oauth.cancelled.store(true, Ordering::Relaxed);
-    }
+pub async fn cancel_login(flow_id: String) -> Result<(), String> {
+    with_pending_oauth(|pending| {
+        if let Some(pending_oauth) = pending.remove(&flow_id) {
+            pending_oauth.cancelled.store(true, Ordering::Relaxed);
+            cancel_oauth_state(&pending_oauth.state);
+        }
+    });
+    Ok(())
+}
+
+/// Cancel all pending OAuth logins.
+#[tauri::command]
+pub async fn cancel_all_logins() -> Result<(), String> {
+    with_pending_oauth(|pending| {
+        for (_, pending_oauth) in pending.drain() {
+            pending_oauth.cancelled.store(true, Ordering::Relaxed);
+            cancel_oauth_state(&pending_oauth.state);
+        }
+    });
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::auth::oauth_server::DEFAULT_PORT;
+
+    static TEST_OAUTH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancel_login_stops_waiting_complete_login() {
-        let _ = cancel_login().await;
-        let _info = start_login().await.expect("start login");
+    async fn start_login_allows_multiple_pending_flows() {
+        let _guard = TEST_OAUTH_LOCK.lock().await;
+        let _ = cancel_all_logins().await;
 
-        let waiter = tokio::spawn(async { complete_login().await });
+        let first = start_login().await.expect("start first login");
+        let second = start_login().await.expect("start second login");
+
+        assert_ne!(first.flow_id, second.flow_id);
+        assert_eq!(first.callback_port, DEFAULT_PORT);
+        assert_eq!(second.callback_port, DEFAULT_PORT);
+        assert!(first
+            .auth_url
+            .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert!(second
+            .auth_url
+            .contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+
+        with_pending_oauth(|pending| {
+            assert!(pending.contains_key(&first.flow_id));
+            assert!(pending.contains_key(&second.flow_id));
+        });
+
+        cancel_all_logins().await.expect("cancel all logins");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_state_callback_does_not_cancel_pending_flows() {
+        let _guard = TEST_OAUTH_LOCK.lock().await;
+        let _ = cancel_all_logins().await;
+
+        let first = start_login().await.expect("start first login");
+        let second = start_login().await.expect("start second login");
+        let response = reqwest::get(format!(
+            "http://127.0.0.1:{DEFAULT_PORT}/auth/callback?state=unknown&code=fake"
+        ))
+        .await
+        .expect("unknown state callback response");
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        with_pending_oauth(|pending| {
+            assert!(pending.contains_key(&first.flow_id));
+            assert!(pending.contains_key(&second.flow_id));
+        });
+
+        cancel_all_logins().await.expect("cancel all logins");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_login_only_cancels_selected_flow() {
+        let _guard = TEST_OAUTH_LOCK.lock().await;
+        let _ = cancel_all_logins().await;
+
+        let first = start_login().await.expect("start first login");
+        let second = start_login().await.expect("start second login");
+
+        cancel_login(first.flow_id.clone())
+            .await
+            .expect("cancel first login");
+
+        with_pending_oauth(|pending| {
+            assert!(!pending.contains_key(&first.flow_id));
+            assert!(pending.contains_key(&second.flow_id));
+        });
+
+        cancel_all_logins().await.expect("cancel all logins");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_login_rejects_unknown_flow() {
+        let _guard = TEST_OAUTH_LOCK.lock().await;
+        let result = complete_login("missing-flow".to_string()).await;
+
+        assert!(result
+            .expect_err("unknown flow should not complete successfully")
+            .contains("No pending OAuth login for this flow"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_all_logins_stops_waiting_complete_login() {
+        let _guard = TEST_OAUTH_LOCK.lock().await;
+        let _ = cancel_all_logins().await;
+        let info = start_login().await.expect("start login");
+        let flow_id = info.flow_id.clone();
+
+        let waiter = tokio::spawn(async move { complete_login(flow_id).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        cancel_login().await.expect("cancel login");
+        cancel_all_logins().await.expect("cancel all logins");
 
         let result = tokio::time::timeout(Duration::from_secs(3), waiter)
             .await

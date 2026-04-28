@@ -10,12 +10,13 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
 use crate::commands::{
-    add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, get_active_account_info, get_masked_account_ids, get_usage,
-    import_accounts_full_encrypted_bytes, import_accounts_slim_text, list_accounts,
-    refresh_account_metadata, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
-    start_login, switch_account, force_switch_account, warmup_account, warmup_all_accounts,
+    add_account_from_auth_json_text, add_account_from_file, cancel_all_logins, cancel_login,
+    check_codex_processes, complete_login, delete_account, export_accounts_full_encrypted_bytes,
+    export_accounts_slim_text, force_switch_account, get_active_account_info,
+    get_masked_account_ids, get_usage, import_accounts_full_encrypted_bytes,
+    import_accounts_slim_text, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
+    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
+    warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +24,13 @@ use crate::commands::{
 struct AccountIdArgs {
     #[serde(alias = "account_id")]
     account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OAuthFlowArgs {
+    #[serde(alias = "flow_id")]
+    flow_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,8 +167,15 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(refresh_account_metadata(args.account_id).await?)
         }
         "start_login" => to_json(start_login().await?),
-        "complete_login" => to_json(complete_login().await?),
-        "cancel_login" => to_json(cancel_login().await?),
+        "complete_login" => {
+            let args: OAuthFlowArgs = parse_args(payload)?;
+            to_json(complete_login(args.flow_id).await?)
+        }
+        "cancel_login" => {
+            let args: OAuthFlowArgs = parse_args(payload)?;
+            to_json(cancel_login(args.flow_id).await?)
+        }
+        "cancel_all_logins" => to_json(cancel_all_logins().await?),
         "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),
         "import_accounts_slim_text" => {
             let args: ImportSlimArgs = parse_args(payload)?;

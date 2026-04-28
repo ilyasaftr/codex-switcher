@@ -11,6 +11,7 @@ import type {
   WarmupSummary,
   ForceSwitchResult,
   ImportAccountsSummary,
+  OAuthLoginInfo,
 } from "../types";
 import { invokeBackend, type FileSource } from "../lib/platform";
 
@@ -472,16 +473,16 @@ export function useAccounts() {
 
   const startOAuthLogin = useCallback(async () => {
     try {
-      const info = await invokeBackend<{ auth_url: string; callback_port: number }>("start_login");
+      const info = await invokeBackend<OAuthLoginInfo>("start_login");
       return info;
     } catch (err) {
       throw err;
     }
   }, []);
 
-  const completeOAuthLogin = useCallback(async () => {
+  const completeOAuthLogin = useCallback(async (flowId: string) => {
     try {
-      const account = await invokeBackend<AccountInfo>("complete_login");
+      const account = await invokeBackend<AccountInfo>("complete_login", { flowId });
       upsertAccount(account);
       await refreshSingleUsage(account.id);
       return account;
@@ -542,11 +543,19 @@ export function useAccounts() {
     [loadAccounts, refreshUsage]
   );
 
-  const cancelOAuthLogin = useCallback(async () => {
+  const cancelOAuthLogin = useCallback(async (flowId: string) => {
     try {
-      await invokeBackend("cancel_login");
+      await invokeBackend("cancel_login", { flowId });
     } catch (err) {
       console.error("Failed to cancel login:", err);
+    }
+  }, []);
+
+  const cancelAllOAuthLogins = useCallback(async () => {
+    try {
+      await invokeBackend("cancel_all_logins");
+    } catch (err) {
+      console.error("Failed to cancel logins:", err);
     }
   }, []);
 
@@ -602,6 +611,7 @@ export function useAccounts() {
     startOAuthLogin,
     completeOAuthLogin,
     cancelOAuthLogin,
+    cancelAllOAuthLogins,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
   };

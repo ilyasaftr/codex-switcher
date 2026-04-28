@@ -158,6 +158,7 @@ function App() {
     startOAuthLogin,
     completeOAuthLogin,
     cancelOAuthLogin,
+    cancelAllOAuthLogins,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
   } = useAccounts();
@@ -646,6 +647,7 @@ function App() {
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
+        onCancelAllOAuth={cancelAllOAuthLogins}
       />
 
       {transferMode ? (

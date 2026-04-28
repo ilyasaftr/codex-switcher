@@ -1,9 +1,10 @@
 //! Local OAuth server for handling ChatGPT login flow
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -16,7 +17,8 @@ use crate::types::{parse_chatgpt_id_token_claims, OAuthLoginInfo, StoredAccount}
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_PORT: u16 = 1455; // Same as official Codex
+pub const DEFAULT_PORT: u16 = 1455; // Same as official Codex
+const OAUTH_LOGIN_TIMEOUT_SECONDS: u64 = 300;
 
 /// PKCE codes for OAuth
 #[derive(Debug, Clone)]
@@ -129,93 +131,162 @@ pub struct OAuthLoginResult {
     pub account: StoredAccount,
 }
 
+pub struct OAuthLoginRegistration {
+    pub info: OAuthLoginInfo,
+    pub rx: oneshot::Receiver<Result<OAuthLoginResult>>,
+    pub cancelled: Arc<AtomicBool>,
+    pub state: String,
+}
+
+struct SharedOAuthServer {
+    flows: Arc<Mutex<HashMap<String, SharedOAuthFlow>>>,
+}
+
+struct SharedOAuthFlow {
+    flow_id: String,
+    pkce: PkceCodes,
+    tx: Option<oneshot::Sender<Result<OAuthLoginResult>>>,
+    cancelled: Arc<AtomicBool>,
+    created_at: Instant,
+}
+
+static SHARED_OAUTH_SERVER: Mutex<Option<SharedOAuthServer>> = Mutex::new(None);
+
+fn with_shared_flows<R>(
+    flows: &Arc<Mutex<HashMap<String, SharedOAuthFlow>>>,
+    f: impl FnOnce(&mut HashMap<String, SharedOAuthFlow>) -> R,
+) -> R {
+    let mut flows = flows.lock().unwrap();
+    f(&mut flows)
+}
+
+fn cleanup_expired_shared_flows(flows: &mut HashMap<String, SharedOAuthFlow>) {
+    let timeout = Duration::from_secs(OAUTH_LOGIN_TIMEOUT_SECONDS);
+    let expired_states = flows
+        .iter()
+        .filter_map(|(state, flow)| {
+            if flow.created_at.elapsed() > timeout {
+                Some(state.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for state in expired_states {
+        if let Some(mut flow) = flows.remove(&state) {
+            flow.cancelled.store(true, Ordering::Relaxed);
+            if let Some(tx) = flow.tx.take() {
+                let _ = tx.send(Err(anyhow::anyhow!("OAuth login timed out")));
+            }
+        }
+    }
+}
+
+fn ensure_shared_oauth_server() -> Result<Arc<Mutex<HashMap<String, SharedOAuthFlow>>>> {
+    let mut shared = SHARED_OAUTH_SERVER.lock().unwrap();
+    if let Some(server) = shared.as_ref() {
+        return Ok(server.flows.clone());
+    }
+
+    let server = Server::http(format!("127.0.0.1:{DEFAULT_PORT}")).map_err(|err| {
+        anyhow::anyhow!(
+            "OAuth callback port {DEFAULT_PORT} is unavailable: {err}. Close the other process using this port and try again."
+        )
+    })?;
+    let server = Arc::new(server);
+    let flows = Arc::new(Mutex::new(HashMap::new()));
+    let server_flows = flows.clone();
+    let server_handle = server.clone();
+
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(run_shared_oauth_server(server_handle, server_flows));
+    });
+
+    println!("[OAuth] Shared callback server started on port {DEFAULT_PORT}");
+    *shared = Some(SharedOAuthServer {
+        flows: flows.clone(),
+    });
+
+    Ok(flows)
+}
+
 /// Start the OAuth login flow
-pub async fn start_oauth_login() -> Result<(
-    OAuthLoginInfo,
-    oneshot::Receiver<Result<OAuthLoginResult>>,
-    Arc<AtomicBool>,
-)> {
+pub async fn start_oauth_login(
+    flow_id: String,
+    created_at: String,
+) -> Result<OAuthLoginRegistration> {
+    let flows = ensure_shared_oauth_server()?;
     let pkce = generate_pkce();
     let state = generate_state();
 
     println!("[OAuth] PKCE challenge: {}", &pkce.code_challenge[..20]);
 
-    // Try official default port first; fall back to a random free port if it is busy.
-    let server = match Server::http(format!("127.0.0.1:{DEFAULT_PORT}")) {
-        Ok(server) => server,
-        Err(default_err) => {
-            println!(
-                "[OAuth] Default callback port {DEFAULT_PORT} unavailable ({default_err}), using a random local port"
-            );
-            Server::http("127.0.0.1:0").map_err(|fallback_err| {
-                anyhow::anyhow!(
-                    "Failed to start OAuth server: default port {DEFAULT_PORT} error: {default_err}; fallback error: {fallback_err}"
-                )
-            })?
-        }
-    };
-
-    let actual_port = match server.server_addr().to_ip() {
-        Some(addr) => addr.port(),
-        None => anyhow::bail!("Failed to determine server port"),
-    };
-
-    let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+    let redirect_uri = format!("http://localhost:{DEFAULT_PORT}/auth/callback");
     let auth_url = build_authorize_url(DEFAULT_ISSUER, CLIENT_ID, &redirect_uri, &pkce, &state);
 
-    println!("[OAuth] Server started on port {actual_port}");
     println!("[OAuth] Redirect URI: {redirect_uri}");
     println!("[OAuth] Auth URL: {auth_url}");
 
     let login_info = OAuthLoginInfo {
+        flow_id: flow_id.clone(),
         auth_url: auth_url.clone(),
-        callback_port: actual_port,
+        callback_port: DEFAULT_PORT,
+        created_at,
     };
 
     // Create a channel for the result
     let (tx, rx) = oneshot::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
 
-    // Spawn the server in a background thread
-    let server = Arc::new(server);
-    let pkce_clone = pkce.clone();
-    let state_clone = state.clone();
-    let cancelled_clone = cancelled.clone();
-
-    thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let result = runtime.block_on(run_oauth_server(
-            server,
-            pkce_clone,
-            state_clone,
-            redirect_uri,
-            cancelled_clone,
-        ));
-        let _ = tx.send(result);
+    with_shared_flows(&flows, |flows| {
+        cleanup_expired_shared_flows(flows);
+        flows.insert(
+            state.clone(),
+            SharedOAuthFlow {
+                flow_id,
+                pkce,
+                tx: Some(tx),
+                cancelled: cancelled.clone(),
+                created_at: Instant::now(),
+            },
+        );
     });
 
-    Ok((login_info, rx, cancelled))
+    Ok(OAuthLoginRegistration {
+        info: login_info,
+        rx,
+        cancelled,
+        state,
+    })
+}
+
+pub fn cancel_oauth_state(state: &str) {
+    let flows = {
+        let shared = SHARED_OAUTH_SERVER.lock().unwrap();
+        shared.as_ref().map(|server| server.flows.clone())
+    };
+
+    if let Some(flows) = flows {
+        with_shared_flows(&flows, |flows| {
+            if let Some(mut flow) = flows.remove(state) {
+                flow.cancelled.store(true, Ordering::Relaxed);
+                if let Some(tx) = flow.tx.take() {
+                    let _ = tx.send(Err(anyhow::anyhow!("OAuth login cancelled")));
+                }
+            }
+        });
+    }
 }
 
 /// Run the OAuth callback server
-async fn run_oauth_server(
+async fn run_shared_oauth_server(
     server: Arc<Server>,
-    pkce: PkceCodes,
-    expected_state: String,
-    redirect_uri: String,
-    cancelled: Arc<AtomicBool>,
-) -> Result<OAuthLoginResult> {
-    let timeout = Duration::from_secs(300); // 5 minute timeout
-    let start = std::time::Instant::now();
-
+    flows: Arc<Mutex<HashMap<String, SharedOAuthFlow>>>,
+) {
     loop {
-        if cancelled.load(Ordering::Relaxed) {
-            anyhow::bail!("OAuth login cancelled");
-        }
-
-        if start.elapsed() > timeout {
-            anyhow::bail!("OAuth login timed out");
-        }
+        with_shared_flows(&flows, cleanup_expired_shared_flows);
 
         // Use recv_timeout to allow checking the timeout
         let request = match server.recv_timeout(Duration::from_secs(1)) {
@@ -224,40 +295,20 @@ async fn run_oauth_server(
             Err(_) => continue,
         };
 
-        let result = handle_oauth_request(request, &pkce, &expected_state, &redirect_uri).await;
-
-        match result {
-            HandleResult::Continue => continue,
-            HandleResult::Success(account) => {
-                server.unblock();
-                return Ok(OAuthLoginResult { account });
-            }
-            HandleResult::Error(e) => {
-                server.unblock();
-                return Err(e);
-            }
-        }
+        handle_oauth_request(request, &flows).await;
     }
-}
-
-enum HandleResult {
-    Continue,
-    Success(StoredAccount),
-    Error(anyhow::Error),
 }
 
 async fn handle_oauth_request(
     request: Request,
-    pkce: &PkceCodes,
-    expected_state: &str,
-    redirect_uri: &str,
-) -> HandleResult {
+    flows: &Arc<Mutex<HashMap<String, SharedOAuthFlow>>>,
+) {
     let url_str = request.url().to_string();
     let parsed = match url::Url::parse(&format!("http://localhost{url_str}")) {
         Ok(u) => u,
         Err(_) => {
             let _ = request.respond(Response::from_string("Bad Request").with_status_code(400));
-            return HandleResult::Continue;
+            return;
         }
     };
 
@@ -273,28 +324,35 @@ async fn handle_oauth_request(
             params.keys().collect::<Vec<_>>()
         );
 
+        let state = match params.get("state") {
+            Some(state) => state.clone(),
+            None => {
+                println!("[OAuth] Missing state");
+                let _ =
+                    request.respond(Response::from_string("Missing state").with_status_code(400));
+                return;
+            }
+        };
+
         // Check for error response
         if let Some(error) = params.get("error") {
             let error_desc = params
                 .get("error_description")
                 .map(|s| s.as_str())
                 .unwrap_or("Unknown error");
+            let message = format!("OAuth error: {error} - {error_desc}");
             println!("[OAuth] Error from provider: {error} - {error_desc}");
             let _ = request.respond(
                 Response::from_string(format!("OAuth Error: {error} - {error_desc}"))
                     .with_status_code(400),
             );
-            return HandleResult::Error(anyhow::anyhow!("OAuth error: {error} - {error_desc}"));
+            if let Some(mut flow) = with_shared_flows(flows, |flows| flows.remove(&state)) {
+                if let Some(tx) = flow.tx.take() {
+                    let _ = tx.send(Err(anyhow::anyhow!(message)));
+                }
+            }
+            return;
         }
-
-        // Verify state
-        if params.get("state").map(String::as_str) != Some(expected_state) {
-            println!("[OAuth] State mismatch!");
-            let _ = request.respond(Response::from_string("State mismatch").with_status_code(400));
-            return HandleResult::Error(anyhow::anyhow!("OAuth state mismatch"));
-        }
-
-        println!("[OAuth] State verified OK");
 
         // Get the authorization code
         let code = match params.get("code") {
@@ -304,14 +362,47 @@ async fn handle_oauth_request(
                 let _ = request.respond(
                     Response::from_string("Missing authorization code").with_status_code(400),
                 );
-                return HandleResult::Error(anyhow::anyhow!("Missing authorization code"));
+                if let Some(mut flow) = with_shared_flows(flows, |flows| flows.remove(&state)) {
+                    if let Some(tx) = flow.tx.take() {
+                        let _ = tx.send(Err(anyhow::anyhow!("Missing authorization code")));
+                    }
+                }
+                return;
             }
         };
 
+        let flow = with_shared_flows(flows, |flows| {
+            cleanup_expired_shared_flows(flows);
+            flows.remove(&state)
+        });
+
+        let mut flow = match flow {
+            Some(flow) => flow,
+            None => {
+                println!("[OAuth] Unknown state");
+                let _ = request
+                    .respond(Response::from_string("Unknown login state").with_status_code(400));
+                return;
+            }
+        };
+
+        if flow.cancelled.load(Ordering::Relaxed) {
+            println!("[OAuth] Login flow was cancelled");
+            let _ = request.respond(Response::from_string("Login cancelled").with_status_code(400));
+            if let Some(tx) = flow.tx.take() {
+                let _ = tx.send(Err(anyhow::anyhow!("OAuth login cancelled")));
+            }
+            return;
+        }
+
+        println!("[OAuth] State verified OK for flow {}", flow.flow_id);
         println!("[OAuth] Got authorization code, exchanging for tokens...");
 
         // Exchange code for tokens
-        match exchange_code_for_tokens(DEFAULT_ISSUER, CLIENT_ID, redirect_uri, pkce, &code).await {
+        let redirect_uri = format!("http://localhost:{DEFAULT_PORT}/auth/callback");
+        match exchange_code_for_tokens(DEFAULT_ISSUER, CLIENT_ID, &redirect_uri, &flow.pkce, &code)
+            .await
+        {
             Ok(tokens) => {
                 println!("[OAuth] Token exchange successful!");
                 // Parse claims from ID token
@@ -357,7 +448,10 @@ async fn handle_oauth_request(
                 );
                 let _ = request.respond(response);
 
-                return HandleResult::Success(account);
+                if let Some(tx) = flow.tx.take() {
+                    let _ = tx.send(Ok(OAuthLoginResult { account }));
+                }
+                return;
             }
             Err(e) => {
                 println!("[OAuth] Token exchange failed: {e}");
@@ -365,14 +459,16 @@ async fn handle_oauth_request(
                     Response::from_string(format!("Token exchange failed: {e}"))
                         .with_status_code(500),
                 );
-                return HandleResult::Error(e);
+                if let Some(tx) = flow.tx.take() {
+                    let _ = tx.send(Err(e));
+                }
+                return;
             }
         }
     }
 
     // Handle other paths
     let _ = request.respond(Response::from_string("Not Found").with_status_code(404));
-    HandleResult::Continue
 }
 
 /// Wait for the OAuth login to complete
